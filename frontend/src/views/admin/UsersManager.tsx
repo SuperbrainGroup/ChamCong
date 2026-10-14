@@ -1,18 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { User, Company } from '../../types';
 import { api } from '../../api/client';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { Users, Plus, Edit2, Lock, Unlock, KeyRound, ArrowLeft, Shield, AlertCircle } from 'lucide-react';
+import { Users, Plus, Edit2, Lock, Unlock, KeyRound, ArrowLeft, Shield, AlertCircle, Building2, Filter, Search, RotateCcw } from 'lucide-react';
 
 interface UsersManagerProps {
   onBack?: () => void;
 }
 
 export const UsersManager: React.FC<UsersManagerProps> = ({ onBack }) => {
+  const { user: currentUser, selectedCompany } = useAuth();
+  const isCurrentUserAdmin = currentUser?.role === 'Admin';
   const toast = useToast();
   const [users, setUsers] = useState<User[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Từ khóa tìm kiếm
+  const [searchKeyword, setSearchKeyword] = useState('');
 
   // Modal thêm/sửa
   const [showModal, setShowModal] = useState(false);
@@ -20,7 +26,7 @@ export const UsersManager: React.FC<UsersManagerProps> = ({ onBack }) => {
   const [username, setUsername] = useState('');
   const [fullName, setFullName] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState<'Admin' | 'Operator'>('Operator');
+  const [role, setRole] = useState<'Admin' | 'HR' | 'Employee'>('HR');
   const [isActive, setIsActive] = useState(true);
   const [assignedCompanies, setAssignedCompanies] = useState<number[]>([]);
   const [saving, setSaving] = useState(false);
@@ -56,9 +62,9 @@ export const UsersManager: React.FC<UsersManagerProps> = ({ onBack }) => {
     setUsername('');
     setFullName('');
     setPassword('');
-    setRole('Operator');
+    setRole('HR');
     setIsActive(true);
-    setAssignedCompanies(companies.length > 0 ? [companies[0].id] : []);
+    setAssignedCompanies(selectedCompany ? [selectedCompany.id] : (companies.length > 0 ? [companies[0].id] : []));
     setError(null);
     setShowModal(true);
   };
@@ -148,12 +154,34 @@ export const UsersManager: React.FC<UsersManagerProps> = ({ onBack }) => {
     return new Map(companies.map(c => [c.id, c]));
   }, [companies]);
 
+  // Danh sách tài khoản đã lọc theo Hội sở làm việc đang chọn và Từ khóa tìm kiếm
+  const filteredUsers = React.useMemo(() => {
+    return users.filter(u => {
+      // 1. Lọc theo Hội sở làm việc đang chọn từ header
+      let matchComp = true;
+      if (selectedCompany) {
+        matchComp = u.role === 'Admin' || (u.assignedCompanyIds && u.assignedCompanyIds.includes(selectedCompany.id));
+      }
+
+      // 2. Lọc theo từ khóa tìm kiếm (username, fullName, employeeCode)
+      let matchSearch = true;
+      if (searchKeyword.trim()) {
+        const kw = searchKeyword.trim().toLowerCase();
+        matchSearch = u.username.toLowerCase().includes(kw) ||
+          u.fullName.toLowerCase().includes(kw) ||
+          (u.employeeCode ? u.employeeCode.toLowerCase().includes(kw) : false);
+      }
+
+      return matchComp && matchSearch;
+    });
+  }, [users, selectedCompany, searchKeyword]);
+
   return (
-    <div style={{ padding: '24px', maxWidth: '1300px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
         <div>
           <div style={{ fontSize: '20px', fontWeight: 800, color: 'var(--neutral-900)' }}>
-            Quản trị Tài khoản & Phân quyền
+            Quản trị Tài khoản & Phân quyền — {selectedCompany ? selectedCompany.name : 'Tất cả hội sở'}
           </div>
           <div style={{ fontSize: '13px', color: 'var(--neutral-500)', marginTop: '2px' }}>
             Quản lý tài khoản đăng nhập, gán vai trò Quản trị viên và Hội sở phụ trách
@@ -164,6 +192,44 @@ export const UsersManager: React.FC<UsersManagerProps> = ({ onBack }) => {
           <Plus size={16} />
           <span>Tạo tài khoản mới</span>
         </button>
+      </div>
+
+      {/* THANH THÔNG TIN HỘI SỞ ĐANG CHỌN & TÌM KIẾM TÀI KHOẢN */}
+      <div style={{
+        backgroundColor: '#FFFFFF',
+        borderRadius: '12px',
+        padding: '14px 18px',
+        border: '1px solid var(--neutral-200)',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: '12px'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '12px', color: 'var(--neutral-500)' }}>
+            (Hiển thị {filteredUsers.length} tài khoản)
+          </span>
+        </div>
+
+        {/* Ô tìm kiếm tài khoản */}
+        <div style={{ position: 'relative', minWidth: '260px' }}>
+          <Search size={15} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: '#94A3B8' }} />
+          <input
+            type="text"
+            placeholder="Tìm theo user, họ tên..."
+            value={searchKeyword}
+            onChange={(e) => setSearchKeyword(e.target.value)}
+            style={{
+              width: '100%',
+              padding: '8px 12px 8px 32px',
+              borderRadius: '8px',
+              border: '1px solid var(--neutral-300)',
+              fontSize: '13px'
+            }}
+          />
+        </div>
       </div>
 
       <div className="card">
@@ -188,69 +254,82 @@ export const UsersManager: React.FC<UsersManagerProps> = ({ onBack }) => {
                   </tr>
                 </thead>
                 <tbody>
-                  {users.map((u, idx) => (
-                    <tr key={u.id}>
-                      <td style={{ textAlign: 'center' }}>{idx + 1}</td>
-                      <td style={{ fontWeight: 700 }}>{u.username}</td>
-                      <td style={{ fontWeight: 600 }}>{u.fullName}</td>
-                      <td style={{ textAlign: 'center' }}>
-                        <span className={`badge ${u.role === 'Admin' ? 'badge-primary' : 'badge-neutral'}`}>
-                          {u.role === 'Admin' ? 'Quản trị viên' : 'NV Chấm công'}
-                        </span>
-                      </td>
-                      <td>
-                        {u.role === 'Admin' ? (
-                          <span style={{ fontSize: '12px', color: 'var(--primary-text)', fontWeight: 600 }}>
-                            Toàn quyền tất cả hội sở
+                  {filteredUsers.length > 0 ? (
+                    filteredUsers.map((u, idx) => (
+                      <tr key={u.id}>
+                        <td style={{ textAlign: 'center' }}>{idx + 1}</td>
+                        <td style={{ fontWeight: 700 }}>{u.username}</td>
+                        <td style={{ fontWeight: 600 }}>{u.fullName}</td>
+                        <td style={{ textAlign: 'center' }}>
+                          <span className={`badge ${
+                            u.role === 'Admin' ? 'badge-primary' :
+                            u.role === 'HR' ? 'badge-info' : 'badge-neutral'
+                          }`}>
+                            {u.role === 'Admin' ? 'Quản trị viên (Admin)' :
+                             u.role === 'HR' ? 'Nhân sự & Chấm công (HCNS)' : 'NV Tự chấm công (Employee)'}
                           </span>
-                        ) : u.assignedCompanyIds && u.assignedCompanyIds.length > 0 ? (
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                            {u.assignedCompanyIds.map((cid) => {
-                              const c = compMap.get(cid);
-                              return c ? (
-                                <span key={cid} className="badge badge-neutral" style={{ fontSize: '11px' }}>
-                                  {c.code}
-                                </span>
-                              ) : null;
-                            })}
+                        </td>
+                        <td>
+                          {u.role === 'Admin' ? (
+                            <span style={{ fontSize: '12px', color: 'var(--primary-text)', fontWeight: 600 }}>
+                              Toàn quyền tất cả hội sở
+                            </span>
+                          ) : u.assignedCompanyIds && u.assignedCompanyIds.length > 0 ? (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                              {u.assignedCompanyIds.map((cid) => {
+                                const c = compMap.get(cid);
+                                return c ? (
+                                  <span key={cid} className="badge badge-neutral" style={{ fontSize: '11px' }}>
+                                    {c.code}
+                                  </span>
+                                ) : null;
+                              })}
+                            </div>
+                          ) : (
+                            <span style={{ fontSize: '12px', color: 'var(--danger-text)' }}>Chưa gán hội sở</span>
+                          )}
+                        </td>
+                        <td style={{ textAlign: 'center' }}>
+                          {u.isLocked ? (
+                            <span className="badge badge-danger">Bị khóa (sai pass)</span>
+                          ) : !u.isActive ? (
+                            <span className="badge badge-neutral">Vô hiệu hóa</span>
+                          ) : (
+                            <span className="badge badge-success">Đang hoạt động</span>
+                          )}
+                        </td>
+                        <td style={{ textAlign: 'center', fontSize: '12px', color: 'var(--neutral-500)' }}>
+                          {u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString('vi-VN') : 'Chưa đăng nhập'}
+                        </td>
+                        <td style={{ textAlign: 'center' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                            <button className="btn btn-secondary btn-sm" onClick={() => handleOpenEdit(u)} title="Sửa thông tin">
+                              <Edit2 size={13} />
+                            </button>
+
+                            <button className="btn btn-secondary btn-sm" onClick={() => { setResettingUser(u); setNewPassword('Admin@123'); }} title="Đặt lại mật khẩu">
+                              <KeyRound size={13} />
+                            </button>
+
+                            <button
+                              className={`btn btn-sm ${u.isLocked ? 'btn-danger' : 'btn-secondary'}`}
+                              onClick={() => handleToggleLock(u)}
+                              title={u.isLocked ? 'Mở khóa' : 'Khóa tài khoản'}
+                            >
+                              {u.isLocked ? <Unlock size={13} /> : <Lock size={13} />}
+                            </button>
                           </div>
-                        ) : (
-                          <span style={{ fontSize: '12px', color: 'var(--danger-text)' }}>Chưa gán hội sở</span>
-                        )}
-                      </td>
-                      <td style={{ textAlign: 'center' }}>
-                        {u.isLocked ? (
-                          <span className="badge badge-danger">Bị khóa (sai pass)</span>
-                        ) : !u.isActive ? (
-                          <span className="badge badge-neutral">Vô hiệu hóa</span>
-                        ) : (
-                          <span className="badge badge-success">Đang hoạt động</span>
-                        )}
-                      </td>
-                      <td style={{ textAlign: 'center', fontSize: '12px', color: 'var(--neutral-500)' }}>
-                        {u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString('vi-VN') : 'Chưa đăng nhập'}
-                      </td>
-                      <td style={{ textAlign: 'center' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
-                          <button className="btn btn-secondary btn-sm" onClick={() => handleOpenEdit(u)} title="Sửa thông tin">
-                            <Edit2 size={13} />
-                          </button>
-
-                          <button className="btn btn-secondary btn-sm" onClick={() => { setResettingUser(u); setNewPassword('Admin@123'); }} title="Đặt lại mật khẩu">
-                            <KeyRound size={13} />
-                          </button>
-
-                          <button
-                            className={`btn btn-sm ${u.isLocked ? 'btn-danger' : 'btn-secondary'}`}
-                            onClick={() => handleToggleLock(u)}
-                            title={u.isLocked ? 'Mở khóa' : 'Khóa tài khoản'}
-                          >
-                            {u.isLocked ? <Unlock size={13} /> : <Lock size={13} />}
-                          </button>
-                        </div>
+                        </td>
+                      </tr>
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={8} style={{ textAlign: 'center', padding: '36px', color: 'var(--neutral-400)' }}>
+                        <div style={{ fontSize: '14px', fontWeight: 600 }}>Không tìm thấy tài khoản nào phù hợp bộ lọc</div>
+                        <div style={{ fontSize: '12px', marginTop: '4px' }}>Thử đổi hội sở làm việc ở trên hoặc xóa từ khóa tìm kiếm.</div>
                       </td>
                     </tr>
-                  ))}
+                  )}
                 </tbody>
               </table>
             </div>
@@ -325,12 +404,13 @@ export const UsersManager: React.FC<UsersManagerProps> = ({ onBack }) => {
                     value={role}
                     onChange={(e) => setRole(e.target.value as any)}
                   >
-                    <option value="Operator">Nhân viên chấm công (Operator)</option>
-                    <option value="Admin">Quản trị viên (Admin)</option>
+                    <option value="HR">Nhân sự & Chấm công (HCNS)</option>
+                    <option value="Employee">Nhân viên tự chấm công (Employee)</option>
+                    {isCurrentUserAdmin && <option value="Admin">Quản trị viên (Admin)</option>}
                   </select>
                 </div>
 
-                {role === 'Operator' && (
+                {(role === 'HR' || (!isCurrentUserAdmin && role === 'Employee')) && (
                   <div className="form-group">
                     <label className="form-label">Gán các Hội sở phụ trách</label>
                     <div style={{

@@ -185,9 +185,7 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
     try {
       const formData = new FormData();
       formData.append('file', importFile);
-      const res = await api.post(`/companies/${selectedCompany.id}/leave/requests/import-excel`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      });
+      const res = await api.post(`/companies/${selectedCompany.id}/leave/requests/import-excel`, formData);
       setImportResult(res.data);
       fetchRequests();
     } catch (err: any) {
@@ -251,6 +249,14 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
       f.fullName.toLowerCase().includes(fundSearch.toLowerCase())
   );
 
+  if (!selectedCompany) {
+    return (
+      <div style={{ padding: '40px', textAlign: 'center', color: 'var(--neutral-500)' }}>
+        Vui lòng chọn một Hội sở làm việc trên thanh Navbar để quản lý đơn nghỉ phép và quỹ phép.
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
       {/* Header Card */}
@@ -283,7 +289,7 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
             </div>
             <div>
               <h1 style={{ fontSize: '1.25rem', fontWeight: 800, margin: 0, color: '#0f172a' }}>
-                Quản Lý Nghỉ Phép
+                Quản Lý Nghỉ Phép — {selectedCompany ? selectedCompany.name : 'Tất cả hội sở'}
               </h1>
               <p style={{ margin: '4px 0 0 0', fontSize: '0.875rem', color: '#64748b' }}>
                 Theo dõi đơn nghỉ phép đã duyệt, số dư quỹ phép năm và chi tiết lịch sử khấu trừ

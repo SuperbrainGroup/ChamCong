@@ -18,8 +18,7 @@ interface AuditLogsViewerProps {
 }
 
 export const AuditLogsViewer: React.FC<AuditLogsViewerProps> = () => {
-  const { selectedCompany, companies } = useAuth();
-  const [filterCompanyId, setFilterCompanyId] = useState<number | ''>(selectedCompany?.id || '');
+  const { selectedCompany } = useAuth();
   const [keyword, setKeyword] = useState('');
   const [searchDebounce, setSearchDebounce] = useState('');
   const [pageIndex, setPageIndex] = useState(1);
@@ -33,8 +32,8 @@ export const AuditLogsViewer: React.FC<AuditLogsViewerProps> = () => {
     setLoading(true);
     try {
       let url = `/audit-logs?pageIndex=${pageIndex}&pageSize=${pageSize}`;
-      if (filterCompanyId !== '') {
-        url += `&companyId=${filterCompanyId}`;
+      if (selectedCompany?.id) {
+        url += `&companyId=${selectedCompany.id}`;
       }
       if (searchDebounce.trim()) {
         url += `&keyword=${encodeURIComponent(searchDebounce.trim())}`;
@@ -59,7 +58,7 @@ export const AuditLogsViewer: React.FC<AuditLogsViewerProps> = () => {
 
   useEffect(() => {
     fetchLogs();
-  }, [filterCompanyId, searchDebounce, pageIndex, pageSize]);
+  }, [selectedCompany?.id, searchDebounce, pageIndex, pageSize]);
 
   const totalPages = data ? Math.ceil(data.totalCount / data.pageSize) : 1;
 
@@ -115,7 +114,7 @@ export const AuditLogsViewer: React.FC<AuditLogsViewerProps> = () => {
             </div>
             <div>
               <h1 style={{ fontSize: '1.25rem', fontWeight: 800, margin: 0, color: '#0f172a' }}>
-                Nhật Ký Thao Tác (Audit Logs)
+                Nhật Ký Thao Tác (Audit Logs) — {selectedCompany ? selectedCompany.name : 'Tất cả hội sở'}
               </h1>
               <p style={{ margin: '4px 0 0 0', fontSize: '0.875rem', color: '#64748b' }}>
                 Lưu vết tự động các thao tác quản trị: tính công, chốt kỳ, chỉnh sửa dữ liệu, phân quyền
@@ -150,27 +149,7 @@ export const AuditLogsViewer: React.FC<AuditLogsViewerProps> = () => {
           }}
         >
           <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '12px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{ fontSize: '13px', fontWeight: 600, color: '#64748b' }}>Chi nhánh:</span>
-              <select
-                value={filterCompanyId}
-                onChange={e => {
-                  setFilterCompanyId(e.target.value === '' ? '' : Number(e.target.value));
-                  setPageIndex(1);
-                }}
-                className="form-control"
-                style={{ width: '220px', padding: '6px 10px', fontSize: '13px' }}
-              >
-                <option value="">-- Tất cả chi nhánh --</option>
-                {companies.map(c => (
-                  <option key={c.id} value={c.id}>
-                    {c.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div style={{ position: 'relative', minWidth: '280px' }}>
+            <div style={{ position: 'relative', minWidth: '320px' }}>
               <Search
                 size={16}
                 color="#94a3b8"

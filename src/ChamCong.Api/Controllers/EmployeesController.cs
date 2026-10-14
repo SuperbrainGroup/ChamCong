@@ -16,12 +16,14 @@ public class EmployeesController : ControllerBase
     private readonly AppDbContext _db;
     private readonly AccessService _access;
     private readonly AuditService _audit;
+    private readonly IPasswordService _passwordService;
 
-    public EmployeesController(AppDbContext db, AccessService access, AuditService audit)
+    public EmployeesController(AppDbContext db, AccessService access, AuditService audit, IPasswordService passwordService)
     {
         _db = db;
         _access = access;
         _audit = audit;
+        _passwordService = passwordService;
     }
 
     public record EmployeeDto(
@@ -38,7 +40,9 @@ public class EmployeesController : ControllerBase
         bool ExemptPunch,
         string? DefaultNote,
         int SortOrder,
-        DateTime CreatedAt);
+        DateTime CreatedAt,
+        bool HasAccount,
+        string? Username);
 
     public class SaveEmployeeDto
     {
@@ -51,11 +55,17 @@ public class EmployeesController : ControllerBase
         public bool ExemptPunch { get; set; }
         public string? DefaultNote { get; set; }
         public int SortOrder { get; set; }
+        public bool CreateUserAccount { get; set; } = true;
+        public string? Username { get; set; }
+        public string? Password { get; set; }
     }
+
+    public record CreateAccountDto(string? Username, string? Password);
 
     [HttpGet]
     public async Task<IActionResult> GetAll(int companyId, [FromQuery] string? keyword, CancellationToken ct)
     {
+        _access.EnsureStaffOrAbove();
         await _access.EnsureCompanyAsync(companyId, ct);
 
         var q = _db.Employees
@@ -72,6 +82,11 @@ public class EmployeesController : ControllerBase
         var depts = await _db.Departments.AsNoTracking().Where(d => d.CompanyId == companyId).ToDictionaryAsync(d => d.Id, d => d.Name, ct);
         var grps = await _db.EmployeeGroups.AsNoTracking().Where(g => g.CompanyId == companyId).ToDictionaryAsync(g => g.Id, g => g.Name, ct);
 
+        var codes = emps.Select(e => e.EmployeeCode).ToList();
+        var userMap = await _db.Users.AsNoTracking()
+            .Where(u => u.EmployeeCode != null && codes.Contains(u.EmployeeCode))
+            .ToDictionaryAsync(u => u.EmployeeCode!, u => u.Username, ct);
+
         var list = emps.Select(e => new EmployeeDto(
             e.Id,
             e.CompanyId,
@@ -86,7 +101,9 @@ public class EmployeesController : ControllerBase
             e.ExemptPunch,
             e.DefaultNote,
             e.SortOrder,
-            e.CreatedAt
+            e.CreatedAt,
+            userMap.ContainsKey(e.EmployeeCode),
+            userMap.GetValueOrDefault(e.EmployeeCode)
         )).ToList();
 
         return Ok(list);
@@ -95,6 +112,7 @@ public class EmployeesController : ControllerBase
     [HttpGet("{id}")]
     public async Task<IActionResult> GetById(int companyId, int id, CancellationToken ct)
     {
+        _access.EnsureStaffOrAbove();
         await _access.EnsureCompanyAsync(companyId, ct);
         var e = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id && x.CompanyId == companyId, ct);
         if (e == null) return NotFound();
@@ -102,17 +120,22 @@ public class EmployeesController : ControllerBase
         var depts = await _db.Departments.AsNoTracking().Where(d => d.CompanyId == companyId).ToDictionaryAsync(d => d.Id, d => d.Name, ct);
         var grps = await _db.EmployeeGroups.AsNoTracking().Where(g => g.CompanyId == companyId).ToDictionaryAsync(g => g.Id, g => g.Name, ct);
 
+        var u = await _db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.EmployeeCode == e.EmployeeCode, ct);
+
         return Ok(new EmployeeDto(
             e.Id, e.CompanyId, e.EmployeeCode, e.FullName,
             e.DepartmentId, e.DepartmentId.HasValue && depts.TryGetValue(e.DepartmentId.Value, out var dn) ? dn : null,
             e.GroupId, grps.TryGetValue(e.GroupId, out var gn) ? gn : "",
-            e.StartDate, e.EndDate, e.ExemptPunch, e.DefaultNote, e.SortOrder, e.CreatedAt
+            e.StartDate, e.EndDate, e.ExemptPunch, e.DefaultNote, e.SortOrder, e.CreatedAt,
+            u != null,
+            u?.Username
         ));
     }
 
     [HttpPost]
     public async Task<IActionResult> Create(int companyId, [FromBody] SaveEmployeeDto dto, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var code = Text.Required(dto.EmployeeCode, "Mã nhân viên", 30).Trim();
         var name = Text.Required(dto.FullName, "Họ và tên", 150);
@@ -134,21 +157,159 @@ public class EmployeesController : ControllerBase
             ExemptPunch = dto.ExemptPunch,
             DefaultNote = Text.Clean(dto.DefaultNote, 500),
             SortOrder = dto.SortOrder,
+            AttendanceSource = "APP",
             CreatedAt = DateTime.Now
         };
 
         _db.Employees.Add(emp);
         await _db.SaveChangesAsync(ct);
 
-        _audit.Log("Employee", emp.Id, "Create", new { code, name }, companyId: companyId);
-        await _db.SaveChangesAsync(ct);
+        // Khởi tạo quỹ phép năm hiện tại nếu chưa có
+        short currentYear = (short)DateTime.Now.Year;
+        if (!await _db.LeaveFunds.AnyAsync(l => l.EmployeeId == emp.Id && l.Year == currentYear, ct))
+        {
+            _db.LeaveFunds.Add(new LeaveFund
+            {
+                EmployeeId = emp.Id,
+                Year = currentYear,
+                AnnualOpening = 12,
+                CarryOpening = 0,
+                CompOpening = 0
+            });
+            await _db.SaveChangesAsync(ct);
+        }
+
+        // Tự động cấp tài khoản đăng nhập nếu được chọn
+        string? createdUsername = null;
+        if (dto.CreateUserAccount)
+        {
+            var company = await _db.Companies.AsNoTracking().FirstOrDefaultAsync(c => c.Id == companyId, ct);
+            var compPrefix = (company?.Code ?? $"c{companyId}").Trim().ToLowerInvariant();
+
+            // Username quy chuẩn: [Mã hội sở]_[Mã nhân viên] (ví dụ: q2_nv01)
+            var expectedUsername = $"{compPrefix}_{code.ToLowerInvariant()}";
+            var rawUsername = string.IsNullOrWhiteSpace(dto.Username)
+                ? expectedUsername
+                : dto.Username.Trim().ToLowerInvariant();
+
+            if (!rawUsername.StartsWith($"{compPrefix}_") && !rawUsername.StartsWith(compPrefix))
+            {
+                rawUsername = $"{compPrefix}_{rawUsername}";
+            }
+
+            var rawPass = string.IsNullOrWhiteSpace(dto.Password) ? "123456" : dto.Password.Trim();
+
+            // Đảm bảo username là duy nhất trong toàn hệ thống
+            var finalUsername = rawUsername;
+            int counter = 1;
+            while (await _db.Users.AnyAsync(u => u.Username == finalUsername, ct))
+            {
+                finalUsername = $"{rawUsername}_{counter++}";
+            }
+
+            var newUser = new User
+            {
+                Username = finalUsername,
+                FullName = name,
+                EmployeeCode = code,
+                Role = Roles.Employee,
+                PasswordHash = _passwordService.HashPassword(rawPass),
+                IsActive = true,
+                MustChangePassword = false,
+                CreatedAt = DateTime.Now
+            };
+            _db.Users.Add(newUser);
+            await _db.SaveChangesAsync(ct);
+
+            _db.UserCompanies.Add(new UserCompany { UserId = newUser.Id, CompanyId = companyId });
+            await _db.SaveChangesAsync(ct);
+            createdUsername = finalUsername;
+        }
+
+        _audit.Log("Employee", emp.Id, "Create", new { code, name, createdUsername }, companyId: companyId);
 
         return CreatedAtAction(nameof(GetById), new { companyId, id = emp.Id }, emp);
+    }
+
+    /// <summary>Cấp mới hoặc đặt lại mật khẩu tài khoản đăng nhập cho nhân viên.</summary>
+    [HttpPost("{id}/create-account")]
+    public async Task<IActionResult> CreateOrResetAccount(int companyId, int id, [FromBody] CreateAccountDto? dto, CancellationToken ct)
+    {
+        _access.EnsureHR();
+        await _access.EnsureCompanyAsync(companyId, ct);
+        var emp = await _db.Employees.FirstOrDefaultAsync(e => e.Id == id && e.CompanyId == companyId, ct);
+        if (emp == null) return NotFound();
+
+        var company = await _db.Companies.AsNoTracking().FirstOrDefaultAsync(c => c.Id == companyId, ct);
+        var compPrefix = (company?.Code ?? $"c{companyId}").Trim().ToLowerInvariant();
+        var defaultUsername = $"{compPrefix}_{emp.EmployeeCode.ToLowerInvariant()}";
+
+        // Tìm user theo hội sở và mã nhân viên để tránh nhầm với hội sở khác
+        var existingUser = await (from u in _db.Users
+                                  join uc in _db.UserCompanies on u.Id equals uc.UserId
+                                  where uc.CompanyId == companyId && u.EmployeeCode == emp.EmployeeCode
+                                  select u).FirstOrDefaultAsync(ct);
+
+        if (existingUser == null)
+        {
+            existingUser = await _db.Users.FirstOrDefaultAsync(u => u.Username == defaultUsername, ct);
+        }
+
+        var rawPassword = string.IsNullOrWhiteSpace(dto?.Password) ? "123456" : dto.Password.Trim();
+        var username = string.IsNullOrWhiteSpace(dto?.Username) 
+            ? (existingUser?.Username ?? defaultUsername) 
+            : dto.Username.Trim().ToLowerInvariant();
+
+        if (!username.StartsWith($"{compPrefix}_") && !username.StartsWith(compPrefix))
+        {
+            username = $"{compPrefix}_{username}";
+        }
+
+        if (existingUser != null)
+        {
+            existingUser.PasswordHash = _passwordService.HashPassword(rawPassword);
+            existingUser.IsLocked = false;
+            existingUser.FailedLoginCount = 0;
+            existingUser.IsActive = true;
+            await _db.SaveChangesAsync(ct);
+            _audit.Log("Employee", emp.Id, "ResetAccount", $"Đặt lại mật khẩu cho @{existingUser.Username}", companyId: companyId);
+            return Ok(new { message = $"Đã cập nhật mật khẩu cho @{existingUser.Username}: {rawPassword}", username = existingUser.Username, password = rawPassword });
+        }
+        else
+        {
+            var finalUsername = username;
+            int counter = 1;
+            while (await _db.Users.AnyAsync(u => u.Username == finalUsername, ct))
+            {
+                finalUsername = $"{username}_{counter++}";
+            }
+
+            var u = new User
+            {
+                Username = finalUsername,
+                FullName = emp.FullName,
+                EmployeeCode = emp.EmployeeCode,
+                PasswordHash = _passwordService.HashPassword(rawPassword),
+                Role = Roles.Employee,
+                IsActive = true,
+                MustChangePassword = false,
+                CreatedAt = DateTime.Now
+            };
+            _db.Users.Add(u);
+            await _db.SaveChangesAsync(ct);
+
+            _db.UserCompanies.Add(new UserCompany { UserId = u.Id, CompanyId = companyId });
+            await _db.SaveChangesAsync(ct);
+
+            _audit.Log("Employee", emp.Id, "CreateAccount", $"Cấp tài khoản mới @{finalUsername}", companyId: companyId);
+            return Ok(new { message = $"Đã cấp tài khoản @{finalUsername} với mật khẩu: {rawPassword}", username = finalUsername, password = rawPassword });
+        }
     }
 
     [HttpPut("{id}")]
     public async Task<IActionResult> Update(int companyId, int id, [FromBody] SaveEmployeeDto dto, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var emp = await _db.Employees.FirstOrDefaultAsync(e => e.Id == id && e.CompanyId == companyId, ct);
         if (emp == null) return NotFound();
@@ -180,6 +341,7 @@ public class EmployeesController : ControllerBase
     [HttpDelete("{id}")]
     public async Task<IActionResult> Delete(int companyId, int id, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var emp = await _db.Employees.FirstOrDefaultAsync(e => e.Id == id && e.CompanyId == companyId, ct);
         if (emp == null) return NotFound();
@@ -212,6 +374,7 @@ public class EmployeesController : ControllerBase
     [HttpGet("template-excel")]
     public IActionResult DownloadTemplateExcel()
     {
+        _access.EnsureHR();
         using var workbook = new XLWorkbook();
         var ws = workbook.Worksheets.Add("DanhSachNhanVien");
 
@@ -271,6 +434,7 @@ public class EmployeesController : ControllerBase
     [HttpPost("import-excel")]
     public async Task<IActionResult> ImportExcel(int companyId, IFormFile file, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
 
         using var stream = file.OpenReadStream();

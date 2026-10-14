@@ -166,80 +166,39 @@ public class ImportService : IImportService
 
         for (int r = headerRow + 1; r <= lastRow; r++)
         {
-            var codeVal = ws.Cell(r, colCode).GetString().Trim();
+            var codeVal = GetCellTextSafe(ws.Cell(r, colCode));
             if (string.IsNullOrEmpty(codeVal)) continue;
 
             report.TotalRows++;
 
-            var nameVal = colName > 0 ? ws.Cell(r, colName).GetString().Trim() : "";
+            var nameVal = colName > 0 ? GetCellTextSafe(ws.Cell(r, colName)) : "";
 
-            // Xử lý ngày công MM/dd/yyyy hoặc số serial Excel
-            var cellDate = ws.Cell(r, colDate);
-            List<DateTime> candidates;
-            if (cellDate.DataType == XLDataType.DateTime || cellDate.Value.IsDateTime)
-            {
-                candidates = new List<DateTime> { cellDate.GetDateTime().Date };
-            }
-            else if (cellDate.DataType == XLDataType.Number || cellDate.Value.IsNumber)
-            {
-                double num = cellDate.Value.GetNumber();
-                if (num > 20000 && num < 80000)
-                {
-                    candidates = new List<DateTime> { DateTime.FromOADate(num).Date };
-                }
-                else
-                {
-                    candidates = DataCleaner.DateCandidates(cellDate.GetString());
-                }
-            }
-            else
-            {
-                candidates = DataCleaner.DateCandidates(cellDate.GetString());
-            }
+            // Xử lý ngày công an toàn
+            var candidates = colDate > 0 ? ParseDateCellSafe(ws.Cell(r, colDate)) : new List<DateTime>();
 
-            // Xử lý giờ vào (trả về cả phút chuẩn theo HH:mm và chuỗi HH:mm:ss hiển thị)
+            // Xử lý giờ vào an toàn (trả về cả phút chuẩn theo HH:mm và chuỗi HH:mm:ss hiển thị)
             int? inMin = null;
             string? inTime = null;
             if (colIn > 0)
             {
-                var cellIn = ws.Cell(r, colIn);
-                (inMin, inTime) = cellIn.DataType switch
-                {
-                    XLDataType.TimeSpan => DataCleaner.ParseTimeDetails(cellIn.GetTimeSpan()),
-                    XLDataType.DateTime => DataCleaner.ParseTimeDetails(cellIn.GetDateTime()),
-                    XLDataType.Number => DataCleaner.ParseTimeDetails(cellIn.Value.GetNumber()),
-                    _ => cellIn.Value.IsTimeSpan ? DataCleaner.ParseTimeDetails(cellIn.GetTimeSpan())
-                       : cellIn.Value.IsDateTime ? DataCleaner.ParseTimeDetails(cellIn.GetDateTime())
-                       : cellIn.Value.IsNumber ? DataCleaner.ParseTimeDetails(cellIn.Value.GetNumber())
-                       : DataCleaner.ParseTimeDetails(cellIn.GetString())
-                };
+                (inMin, inTime) = ParseTimeCellSafe(ws.Cell(r, colIn));
             }
 
-            // Xử lý giờ ra (trả về cả phút chuẩn theo HH:mm và chuỗi HH:mm:ss hiển thị)
+            // Xử lý giờ ra an toàn (trả về cả phút chuẩn theo HH:mm và chuỗi HH:mm:ss hiển thị)
             int? outMin = null;
             string? outTime = null;
             if (colOut > 0)
             {
-                var cellOut = ws.Cell(r, colOut);
-                (outMin, outTime) = cellOut.DataType switch
-                {
-                    XLDataType.TimeSpan => DataCleaner.ParseTimeDetails(cellOut.GetTimeSpan()),
-                    XLDataType.DateTime => DataCleaner.ParseTimeDetails(cellOut.GetDateTime()),
-                    XLDataType.Number => DataCleaner.ParseTimeDetails(cellOut.Value.GetNumber()),
-                    _ => cellOut.Value.IsTimeSpan ? DataCleaner.ParseTimeDetails(cellOut.GetTimeSpan())
-                       : cellOut.Value.IsDateTime ? DataCleaner.ParseTimeDetails(cellOut.GetDateTime())
-                       : cellOut.Value.IsNumber ? DataCleaner.ParseTimeDetails(cellOut.Value.GetNumber())
-                       : DataCleaner.ParseTimeDetails(cellOut.GetString())
-                };
+                (outMin, outTime) = ParseTimeCellSafe(ws.Cell(r, colOut));
             }
 
-            string? hours = colHours > 0 ? ws.Cell(r, colHours).GetString().Trim() : null;
-            string? lType = colLeaveType > 0 ? ws.Cell(r, colLeaveType).GetString().Trim() : null;
-            string? lStatus = colLeaveStatus > 0 ? ws.Cell(r, colLeaveStatus).GetString().Trim() : null;
-            string? lHours = colLeaveHours > 0 ? ws.Cell(r, colLeaveHours).GetString().Trim() : null;
-            string? ioStatus = colInOutStatus > 0 ? ws.Cell(r, colInOutStatus).GetString().Trim() : null;
-            string? reason = colReason > 0 ? ws.Cell(r, colReason).GetString().Trim() : null;
-            string? shift = colShift > 0 ? ws.Cell(r, colShift).GetString().Trim() : null;
+            string? hours = colHours > 0 ? GetCellTextSafe(ws.Cell(r, colHours)) : null;
+            string? lType = colLeaveType > 0 ? GetCellTextSafe(ws.Cell(r, colLeaveType)) : null;
+            string? lStatus = colLeaveStatus > 0 ? GetCellTextSafe(ws.Cell(r, colLeaveStatus)) : null;
+            string? lHours = colLeaveHours > 0 ? GetCellTextSafe(ws.Cell(r, colLeaveHours)) : null;
+            string? ioStatus = colInOutStatus > 0 ? GetCellTextSafe(ws.Cell(r, colInOutStatus)) : null;
+            string? reason = colReason > 0 ? GetCellTextSafe(ws.Cell(r, colReason)) : null;
+            string? shift = colShift > 0 ? GetCellTextSafe(ws.Cell(r, colShift)) : null;
 
             rawRows.Add((r, codeVal, nameVal, candidates, inMin, outMin, inTime, outTime, hours, lType, lStatus, lHours, ioStatus, reason, shift));
         }
@@ -392,5 +351,68 @@ public class ImportService : IImportService
         }
 
         return report;
+    }
+
+    private static string GetCellTextSafe(IXLCell cell)
+    {
+        try
+        {
+            if (cell.IsEmpty()) return string.Empty;
+            return cell.GetString().Trim();
+        }
+        catch
+        {
+            try { return cell.Value.ToString().Trim(); } catch { return string.Empty; }
+        }
+    }
+
+    private static List<DateTime> ParseDateCellSafe(IXLCell cell)
+    {
+        try
+        {
+            if (cell.IsEmpty()) return new List<DateTime>();
+            if (cell.DataType == XLDataType.DateTime || cell.Value.IsDateTime)
+            {
+                return new List<DateTime> { cell.GetDateTime().Date };
+            }
+            if (cell.DataType == XLDataType.Number || cell.Value.IsNumber)
+            {
+                double num = cell.Value.GetNumber();
+                if (num > 20000 && num < 80000)
+                {
+                    return new List<DateTime> { DateTime.FromOADate(num).Date };
+                }
+            }
+            return DataCleaner.DateCandidates(GetCellTextSafe(cell));
+        }
+        catch
+        {
+            return DataCleaner.DateCandidates(GetCellTextSafe(cell));
+        }
+    }
+
+    private static (int? Minutes, string? FormattedTime) ParseTimeCellSafe(IXLCell cell)
+    {
+        try
+        {
+            if (cell.IsEmpty()) return (null, null);
+            if (cell.DataType == XLDataType.TimeSpan || cell.Value.IsTimeSpan)
+            {
+                return DataCleaner.ParseTimeDetails(cell.GetTimeSpan());
+            }
+            if (cell.DataType == XLDataType.DateTime || cell.Value.IsDateTime)
+            {
+                return DataCleaner.ParseTimeDetails(cell.GetDateTime());
+            }
+            if (cell.DataType == XLDataType.Number || cell.Value.IsNumber)
+            {
+                return DataCleaner.ParseTimeDetails(cell.Value.GetNumber());
+            }
+            return DataCleaner.ParseTimeDetails(GetCellTextSafe(cell));
+        }
+        catch
+        {
+            try { return DataCleaner.ParseTimeDetails(GetCellTextSafe(cell)); } catch { return (null, null); }
+        }
     }
 }

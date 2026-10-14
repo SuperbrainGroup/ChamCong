@@ -42,6 +42,7 @@ public class AuditLogsController : ControllerBase
         [FromQuery] int pageSize = 50,
         CancellationToken ct = default)
     {
+        _access.EnsureStaffOrAbove();
         var allowedCompanies = await _access.AllowedCompanyIdsAsync(ct);
         string? companyIdsParam = null;
 

@@ -269,6 +269,14 @@ export const CalendarManager: React.FC<CalendarManagerProps> = () => {
     return cells;
   }, [currentYear, currentMonth, daysByDate]);
 
+  if (!selectedCompany) {
+    return (
+      <div style={{ padding: '40px', textAlign: 'center', color: 'var(--neutral-500)' }}>
+        Vui lòng chọn một Hội sở làm việc trên thanh Navbar để quản lý lịch làm việc và ngày lễ.
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
       {/* Top Header Card */}
@@ -301,7 +309,7 @@ export const CalendarManager: React.FC<CalendarManagerProps> = () => {
             </div>
             <div>
               <h1 style={{ fontSize: '1.25rem', fontWeight: 800, margin: 0, color: '#0f172a' }}>
-                Quản lý Lịch Làm Việc & Nghỉ Lễ — {selectedCompany?.name}
+                Quản lý Lịch Làm Việc & Nghỉ Lễ — {selectedCompany ? selectedCompany.name : 'Tất cả hội sở'}
               </h1>
               <p style={{ margin: '4px 0 0 0', fontSize: '0.875rem', color: '#64748b' }}>
                 Cấu hình mô hình làm việc (T2-T7, T3-CN, Thứ 7 cách tuần), ngày lễ và số công chuẩn

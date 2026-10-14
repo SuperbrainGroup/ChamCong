@@ -273,8 +273,11 @@ public class CalculationService : ICalculationService
         _db.DayResults.RemoveRange(oldResults);
         _db.DayResults.AddRange(newResults);
 
-        // 10. Module 5 (Cơ bản): Cập nhật Sổ cái phép cho kỳ này
-        var oldLedgers = await _db.LeaveLedger.Where(l => l.PeriodId == period.Id).ToListAsync(ct);
+        // 10. Module 5 (Cơ bản): Cập nhật Sổ cái phép cho kỳ này (xóa cả bản ghi tạm PeriodId == null để chống trừ trùng)
+        var empIds = employees.Select(e => e.Id).ToList();
+        var oldLedgers = await _db.LeaveLedger
+            .Where(l => l.PeriodId == period.Id || (l.PeriodId == null && l.Date >= period.FromDate && l.Date <= period.ToDate && empIds.Contains(l.EmployeeId)))
+            .ToListAsync(ct);
         _db.LeaveLedger.RemoveRange(oldLedgers);
 
         var currentFunds = await _db.LeaveFunds

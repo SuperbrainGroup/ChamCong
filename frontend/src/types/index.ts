@@ -2,7 +2,10 @@ export interface User {
   id: number;
   username: string;
   fullName: string;
-  role: 'Admin' | 'Operator';
+  role: 'Admin' | 'HR' | 'Employee';
+  roles?: string[];
+  employeeCode?: string;
+  privacyConsentAtUtc?: string;
   isActive: boolean;
   isLocked: boolean;
   failedLoginCount?: number;
@@ -10,6 +13,136 @@ export interface User {
   lastLoginAt?: string;
   createdAt?: string;
   assignedCompanyIds: number[];
+}
+
+export interface EmployeeDevice {
+  deviceBindingId: number;
+  employeeCode?: string;
+  employeeName?: string;
+  deviceType: 'MOBILE' | 'PC';
+  deviceName?: string;
+  operatingSystem?: string;
+  browserInfo?: string;
+  fingerprintHash?: string;
+  macAddress?: string;
+  approvalStatus: 'PENDING' | 'APPROVED' | 'REJECTED' | 'REVOKED';
+  requestedAtUtc: string;
+  lastUsedAtUtc?: string;
+}
+
+export interface PunchItem {
+  webLogId: number;
+  checkTimeLocal?: string;
+  time?: string;
+  verificationStatus: 'VALID' | 'REVIEW' | 'OUT_OF_OFFICE';
+  reasonCode?: string;
+  reviewState: 'NONE' | 'PENDING' | 'ACCEPTED' | 'REJECTED';
+  channel: string;
+  ipOk?: boolean;
+  gpsState?: string;
+}
+
+export interface PunchState {
+  workDate: string;
+  currentMode: 'CHECK_IN' | 'CHECKED_IN' | 'CHECK_OUT' | 'COMPLETED';
+  hasValidCheckin?: boolean;
+  canCheckout?: boolean;
+  remainingMinutesToCheckout?: number;
+  firstPunchTime?: string;
+  lastPunchTime?: string;
+  todayPunchCount: number;
+  clientPublicIp: string;
+  pcMacAddress?: string;
+  pcApprovalStatus?: string;
+  punches: PunchItem[];
+}
+
+export interface UserRequestItem {
+  requestId: number;
+  requestType: 'LEAVE' | 'REGULARIZATION';
+  leaveCode?: string;
+  fromDate: string;
+  toDate: string;
+  dayPart?: string;
+  daysRequested: number;
+  reasonCode?: string;
+  reason: string;
+  actualTimeIn?: string;
+  actualTimeOut?: string;
+  status: 'PENDING_HR' | 'APPROVED' | 'REJECTED' | 'CANCELLED';
+  hrNote?: string;
+  createdAt: string;
+  attachmentCount: number;
+}
+
+export interface LeaveBalanceSummary {
+  year: number;
+  annualOpening: number;
+  carryOpening: number;
+  compOpening: number;
+  totalOpening: number;
+  used: number;
+  held: number;
+  available: number;
+}
+
+export interface PublishedTimesheetData {
+  isPublished: boolean;
+  message?: string;
+  publicationId?: number;
+  versionNo?: number;
+  publishedAt?: string;
+  summary?: {
+    workDays: number;
+    holidayDays: number;
+    annualLeaveDays: number;
+    paidLeaveDays: number;
+    unpaidLeaveDays: number;
+    paidDays: number;
+    lateEarlyMinutes: number;
+  };
+  dailyCodes?: { dayIndex: number; code: string }[];
+}
+
+export interface BranchLocationItem {
+  locationId: number;
+  branchCode: string;
+  locationName: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
+  isActive: boolean;
+}
+
+export interface BranchNetworkItem {
+  networkId: number;
+  branchCode: string;
+  cidr: string;
+  description?: string;
+  isActive: boolean;
+  validFrom: string;
+  validTo?: string;
+}
+
+export interface HrDashboardSummary {
+  todayDate: string;
+  checkedInCount: number;
+  validCount: number;
+  reviewCount: number;
+  outCount: number;
+  pendingDevices: number;
+  pendingRequests: number;
+  openAlerts: number;
+}
+
+export interface AppNotification {
+  notificationId: number;
+  title: string;
+  body?: string;
+  linkType?: string;
+  linkId?: number;
+  isRead: boolean;
+  timeLocal: string;
 }
 
 export interface Company {
@@ -49,6 +182,8 @@ export interface Employee {
   exemptPunch: boolean;
   defaultNote?: string;
   sortOrder: number;
+  hasAccount?: boolean;
+  username?: string;
 }
 
 export interface AttendanceCode {

@@ -1,0 +1,17 @@
+{
+  "short_name": "Chấm Công",
+  "name": "Nền Tảng Quản Trị Chấm Công Thông Minh",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "192x192 512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#f8fafc",
+  "theme_color": "#0056B3",
+  "display": "standalone",
+  "orientation": "portrait"
+}

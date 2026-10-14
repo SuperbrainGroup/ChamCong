@@ -88,11 +88,19 @@ export const ParametersManager: React.FC<ParametersManagerProps> = ({ onBack }) 
     }
   };
 
+  if (!selectedCompany) {
+    return (
+      <div style={{ padding: '40px', textAlign: 'center', color: 'var(--neutral-500)' }}>
+        Vui lòng chọn một Hội sở làm việc trên thanh Navbar để tra cứu hoặc thiết lập bảng tham số quản trị.
+      </div>
+    );
+  }
+
   return (
-    <div style={{ padding: '24px', maxWidth: '1400px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <div>
         <div style={{ fontSize: '20px', fontWeight: 800, color: 'var(--neutral-900)' }}>
-          Bảng cấu hình tham số quản trị — {selectedCompany?.name}
+          Bảng Cấu Hình Tham Số Quản Trị — {selectedCompany ? selectedCompany.name : 'Tất cả hội sở'}
         </div>
         <div style={{ fontSize: '13px', color: 'var(--neutral-500)', marginTop: '2px' }}>
           Thiết lập ca làm việc, thời gian ăn trưa, bù giờ đối xứng, ân hạn và ngưỡng tính công

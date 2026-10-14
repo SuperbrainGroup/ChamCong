@@ -1,12 +1,14 @@
 import React, { useState, useEffect } from 'react';
+import { useAuth } from '../../context/AuthContext';
 import { api } from '../../api/client';
-import { Building2, Users, UserCheck, Calendar, Sliders, FileText, History, Shield, ArrowRight } from 'lucide-react';
+import { Building2, Users, UserCheck, Calendar, Sliders, FileText, History, Shield, ArrowRight, Clock, ShieldCheck, Smartphone } from 'lucide-react';
 
 interface AdminDashboardProps {
   onNavigate: (view: string) => void;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) => {
+  const { selectedCompany } = useAuth();
   const [stats, setStats] = useState({
     companiesCount: 0,
     usersCount: 0,
@@ -38,6 +40,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
   }, []);
 
   const adminModules = [
+    { id: 'operator', title: 'Chấm Công Máy (Workflow 4 Bước)', desc: 'Nạp file dữ liệu máy chấm công (.xlsx, .csv), kiểm tra dữ liệu, tính công tự động và chốt kỳ.', icon: Clock, color: '#0056B3' },
+    { id: 'admin-hr-attendance', title: 'Duyệt Chấm Công Di Động (ESS)', desc: 'Duyệt cờ GPS/IP drift, phê duyệt thiết bị di động, cấu hình Geofence hội sở và công bố bảng công.', icon: ShieldCheck, color: '#0f766e' },
     { id: 'admin-companies', title: 'Hội sở / Công ty', desc: 'Quản lý danh sách các hội sở đa đơn vị, tải logo thương hiệu riêng.', icon: Building2, color: '#2563eb' },
     { id: 'admin-users', title: 'Tài khoản & Phân quyền', desc: 'Quản lý tài khoản đăng nhập, gán vai trò Admin / Nhân viên chấm công và hội sở phụ trách.', icon: Users, color: '#0f766e' },
     { id: 'admin-employees', title: 'Danh mục Nhân sự', desc: 'Bộ phận, Khối nhân viên (Chuẩn, Part-time, Remote), hồ sơ nhân sự, mã máy chấm công.', icon: UserCheck, color: '#16a34a' },
@@ -49,7 +53,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
   ];
 
   return (
-    <div style={{ padding: '28px', maxWidth: '1400px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '28px' }}>
+    <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '24px' }}>
       {/* Welcome Banner */}
       <div style={{
         backgroundColor: '#ffffff',
@@ -65,7 +69,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onNavigate }) =>
       }}>
         <div>
           <h1 style={{ fontSize: '22px', fontWeight: 800, color: 'var(--neutral-900)', marginBottom: '6px' }}>
-            BẢNG ĐIỀU KHIỂN QUẢN TRỊ HỆ THỐNG
+            BẢNG ĐIỀU KHIỂN QUẢN TRỊ HỆ THỐNG — {selectedCompany ? selectedCompany.name : 'Tất cả hội sở'}
           </h1>
           <p style={{ fontSize: '14px', color: 'var(--neutral-600)' }}>
             Hệ thống quản lý dữ liệu nhân sự, lịch làm việc, quỹ phép và tính công nội bộ Superbrain.

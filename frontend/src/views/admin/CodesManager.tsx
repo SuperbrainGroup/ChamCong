@@ -96,11 +96,19 @@ export const CodesManager: React.FC<CodesManagerProps> = ({ onBack }) => {
     }
   };
 
+  if (!selectedCompany) {
+    return (
+      <div style={{ padding: '40px', textAlign: 'center', color: 'var(--neutral-500)' }}>
+        Vui lòng chọn một Hội sở làm việc trên thanh Navbar để tra cứu hoặc thiết lập cấu hình bảng mã ký hiệu chấm công.
+      </div>
+    );
+  }
+
   return (
-    <div style={{ padding: '24px', maxWidth: '1300px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       <div>
         <div style={{ fontSize: '20px', fontWeight: 800, color: 'var(--neutral-900)' }}>
-          Bảng quy chuẩn mã ký hiệu chấm công & quy đổi công
+          Bảng Quy Chuẩn Mã Ký Hiệu Chấm Công — {selectedCompany ? selectedCompany.name : 'Tất cả hội sở'}
         </div>
         <div style={{ fontSize: '13px', color: 'var(--neutral-500)', marginTop: '2px' }}>
           14 mã quy chuẩn xác định giá trị công, ngày phép và màu sắc hiển thị

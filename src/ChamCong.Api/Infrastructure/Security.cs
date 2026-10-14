@@ -17,7 +17,7 @@ public class PasswordService : IPasswordService
 {
     private const int SaltSize = 16; // 128 bit
     private const int KeySize = 32;  // 256 bit
-    private const int Iterations = 100_000;
+    private const int Iterations = 210_000; // Phase 2: >= 210,000 rounds
 
     public string HashPassword(string password)
     {
@@ -36,7 +36,7 @@ public class PasswordService : IPasswordService
         var parts = hash.Split('.');
         if (parts.Length != 3) return false;
 
-        var iterations = int.Parse(parts[0]);
+        if (!int.TryParse(parts[0], out var iterations)) return false;
         var salt = Convert.FromBase64String(parts[1]);
         var expectedKey = Convert.FromBase64String(parts[2]);
 
@@ -47,9 +47,38 @@ public class PasswordService : IPasswordService
     }
 }
 
+public static class CryptoUtil
+{
+    /// <summary>Băm chuỗi sang SHA-256 dạng Hex 64 ký tự viết thường.</summary>
+    public static string Sha256Hex(string input)
+    {
+        if (string.IsNullOrEmpty(input)) return "";
+        var bytes = Encoding.UTF8.GetBytes(input);
+        var hash = SHA256.HashData(bytes);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// <summary>Băm mảng byte sang SHA-256 dạng Hex 64 ký tự viết thường.</summary>
+    public static string Sha256Hex(byte[] bytes)
+    {
+        var hash = SHA256.HashData(bytes);
+        return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// <summary>Sinh chuỗi ngẫu nhiên cryptographically secure độ dài 256-bit (Hex 64 ký tự).</summary>
+    public static string GenerateRandomSecret(int byteCount = 32)
+    {
+        var bytes = new byte[byteCount];
+        RandomNumberGenerator.Fill(bytes);
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+}
+
 public interface ITokenService
 {
     string GenerateToken(User user, IEnumerable<int> companyIds);
+    string GenerateAccessToken(User user, IEnumerable<string> roles, IEnumerable<int> companyIds, TimeSpan? lifetime = null);
+    (string RawToken, string TokenHash) GenerateRefreshToken();
 }
 
 public class TokenService : ITokenService
@@ -61,50 +90,75 @@ public class TokenService : ITokenService
         _config = config;
     }
 
-    public string GenerateToken(User user, IEnumerable<int> companyIds)
+    private SymmetricSecurityKey GetSecurityKey()
     {
         var secret = Environment.GetEnvironmentVariable("JWT_SECRET")
             ?? _config["Jwt:Secret"]
             ?? "Superbrain_ChamCong_Secret_Key_For_Jwt_Token_2026_Secure_Key_Long_Enough_256bits!";
-        var issuer = Environment.GetEnvironmentVariable("JWT_ISSUER")
-            ?? _config["Jwt:Issuer"]
-            ?? "ChamCongApp";
-        var audience = Environment.GetEnvironmentVariable("JWT_AUDIENCE")
-            ?? _config["Jwt:Audience"]
-            ?? "ChamCongUsers";
+        return new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
+    }
+
+    public string GenerateToken(User user, IEnumerable<int> companyIds)
+    {
         var expiryHoursStr = Environment.GetEnvironmentVariable("JWT_EXPIRY_HOURS")
             ?? _config["Jwt:ExpiryHours"]
             ?? "24";
         int.TryParse(expiryHoursStr, out var expiryHours);
         if (expiryHours <= 0) expiryHours = 24;
 
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secret));
-        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        return GenerateAccessToken(user, new[] { user.Role }, companyIds, TimeSpan.FromHours(expiryHours));
+    }
+
+    public string GenerateAccessToken(User user, IEnumerable<string> roles, IEnumerable<int> companyIds, TimeSpan? lifetime = null)
+    {
+        var issuer = Environment.GetEnvironmentVariable("JWT_ISSUER")
+            ?? _config["Jwt:Issuer"]
+            ?? "ChamCongApp";
+        var audience = Environment.GetEnvironmentVariable("JWT_AUDIENCE")
+            ?? _config["Jwt:Audience"]
+            ?? "ChamCongUsers";
 
         var claims = new List<Claim>
         {
             new(ClaimTypes.NameIdentifier, user.Id.ToString()),
             new(ClaimTypes.Name, user.Username),
             new(ClaimTypes.GivenName, user.FullName),
-            new(ClaimTypes.Role, user.Role),
-            new("MustChangePassword", user.MustChangePassword.ToString().ToLower())
+            new("MustChangePassword", user.MustChangePassword.ToString().ToLower()),
+            new("Consent", (user.PrivacyConsentAtUtc != null).ToString().ToLower())
         };
+
+        if (!string.IsNullOrEmpty(user.EmployeeCode))
+        {
+            claims.Add(new Claim("EmployeeCode", user.EmployeeCode));
+        }
+
+        foreach (var role in roles)
+        {
+            claims.Add(new Claim(ClaimTypes.Role, role));
+        }
 
         foreach (var cId in companyIds)
         {
             claims.Add(new Claim("CompanyId", cId.ToString()));
         }
 
-        var expires = DateTime.UtcNow.AddHours(expiryHours);
+        var expires = DateTime.UtcNow.Add(lifetime ?? TimeSpan.FromMinutes(15)); // Phase 2: 15-minute access token
 
         var token = new JwtSecurityToken(
             issuer: issuer,
             audience: audience,
             claims: claims,
             expires: expires,
-            signingCredentials: creds
+            signingCredentials: new SigningCredentials(GetSecurityKey(), SecurityAlgorithms.HmacSha256)
         );
 
         return new JwtSecurityTokenHandler().WriteToken(token);
+    }
+
+    public (string RawToken, string TokenHash) GenerateRefreshToken()
+    {
+        var raw = CryptoUtil.GenerateRandomSecret(32);
+        var hash = CryptoUtil.Sha256Hex(raw);
+        return (raw, hash);
     }
 }

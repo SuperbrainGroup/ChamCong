@@ -73,6 +73,21 @@ builder.Services.AddScoped<IImportService, ImportService>();
 builder.Services.AddScoped<ICalculationService, CalculationService>();
 builder.Services.AddScoped<IExcelExportService, ExcelExportService>();
 
+// --- Phase 2 Services ---
+builder.Services.AddScoped<IDeviceService, DeviceService>();
+builder.Services.AddScoped<IGeofenceService, GeofenceService>();
+builder.Services.AddScoped<IAttendancePunchService, AttendancePunchService>();
+builder.Services.AddScoped<IEmployeeRequestService, EmployeeRequestService>();
+builder.Services.AddScoped<ITimesheetPublicationService, TimesheetPublicationService>();
+
+// Cấu hình giới hạn dung lượng upload file (50MB)
+builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(options =>
+{
+    options.MultipartBodyLengthLimit = 52428800; // 50MB
+    options.ValueLengthLimit = int.MaxValue;
+    options.MultipartHeadersLengthLimit = int.MaxValue;
+});
+
 // ==============================================================================
 // 3. Authentication & Authorization (Deny-by-default)
 // ==============================================================================
@@ -173,7 +188,14 @@ app.Use(async (context, next) =>
 
         context.Response.StatusCode = 500;
         context.Response.ContentType = "application/json; charset=utf-8";
-        var payload = JsonSerializer.Serialize(new { message = "Đã xảy ra lỗi trên máy chủ. Vui lòng thử lại sau hoặc liên hệ quản trị viên." });
+        var payload = JsonSerializer.Serialize(new
+        {
+            message = "Đã xảy ra lỗi trên máy chủ. Vui lòng thử lại sau hoặc liên hệ quản trị viên.",
+            error = ex.Message,
+            inner = ex.InnerException?.Message,
+            stackTrace = ex.StackTrace,
+            type = ex.GetType().FullName
+        });
         await context.Response.WriteAsync(payload);
     }
 });

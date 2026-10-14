@@ -43,6 +43,7 @@ public class ParametersController : ControllerBase
     [HttpGet("companies/{companyId}/parameters")]
     public async Task<IActionResult> GetParameters(int companyId, CancellationToken ct)
     {
+        _access.EnsureStaffOrAbove();
         await _access.EnsureCompanyAsync(companyId, ct);
 
         var groups = await _db.EmployeeGroups
@@ -108,9 +109,9 @@ public class ParametersController : ControllerBase
         DateTime EffectiveFrom);
 
     [HttpPost("companies/{companyId}/parameters")]
-    [Authorize(Roles = Roles.Admin)]
     public async Task<IActionResult> SaveParameter(int companyId, [FromBody] SaveParameterValueDto dto, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var def = ParamCatalog.Find(dto.Code);
         if (def == null) return BadRequest(new { message = $"Mã tham số '{dto.Code}' không hợp lệ." });

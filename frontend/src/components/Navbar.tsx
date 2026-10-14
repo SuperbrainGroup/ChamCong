@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { usePlatform } from '../context/PlatformContext';
 import {
   Building2,
   UserCircle,
@@ -17,7 +18,11 @@ import {
   Shield,
   Clock,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Smartphone,
+  ShieldCheck,
+  Palette,
+  Monitor
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -28,6 +33,7 @@ interface NavbarProps {
 
 export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenChangePassword }) => {
   const { user, companies, selectedCompany, setSelectedCompany, logout } = useAuth();
+  const { settings } = usePlatform();
   const toast = useToast();
   const [showUserMenu, setShowUserMenu] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
@@ -83,6 +89,8 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
 
   const adminNavItems = [
     { id: 'admin-dashboard', label: 'Bảng Điều Khiển', icon: LayoutDashboard },
+    { id: 'operator', label: 'Chấm Công', icon: Clock },
+    { id: 'admin-hr-attendance', label: 'Duyệt Chấm Công', icon: ShieldCheck },
     { id: 'admin-companies', label: 'Hội sở / Đơn vị', icon: Building2 },
     { id: 'admin-users', label: 'Tài khoản & Phân quyền', icon: Users },
     { id: 'admin-employees', label: 'Danh mục Nhân sự', icon: UserCheck },
@@ -91,17 +99,34 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
     { id: 'admin-calendar', label: 'Lịch Làm Việc & Nghỉ Lễ', icon: Calendar },
     { id: 'admin-leave', label: 'Quản lý nghỉ phép', icon: Wallet },
     { id: 'admin-audit', label: 'Nhật Ký Thao tác', icon: Shield },
+    { id: 'admin-platform', label: 'Cấu hình Nền tảng', icon: Palette },
   ];
 
-  const operatorNavItems = [
+  const hrNavItems = [
+    { id: 'admin-dashboard', label: 'Bảng Điều Khiển', icon: LayoutDashboard },
     { id: 'operator', label: 'Chấm Công', icon: Clock },
+    { id: 'admin-hr-attendance', label: 'Duyệt Chấm Công', icon: ShieldCheck },
+    { id: 'admin-users', label: 'Tài khoản & Phân quyền', icon: Users },
     { id: 'admin-employees', label: 'Danh mục Nhân sự', icon: UserCheck },
     { id: 'admin-calendar', label: 'Lịch Làm Việc & Nghỉ Lễ', icon: Calendar },
     { id: 'admin-leave', label: 'Quản lý nghỉ phép', icon: Wallet },
     { id: 'admin-codes', label: 'Mã Ký Hiệu Chấm Công', icon: FileText },
+    { id: 'admin-parameters', label: 'Cấu Hình Tham Số', icon: Sliders },
+    { id: 'ess-portal', label: 'Chấm Công Cá Nhân', icon: Monitor },
   ];
 
-  const activeNavItems = isAdmin ? adminNavItems : operatorNavItems;
+  const employeeNavItems = [
+    { id: 'ess-portal', label: 'Điểm Danh & Chấm Công (PC)', icon: Monitor },
+    { id: 'ess-history', label: 'Lịch Sử Chấm Công', icon: Clock },
+    { id: 'ess-requests', label: 'Đơn Nghỉ Phép & Giải Trình', icon: Wallet },
+    { id: 'ess-devices', label: 'Thiết Bị & Địa Chỉ MAC', icon: ShieldCheck },
+  ];
+
+  const activeNavItems = isAdmin
+    ? adminNavItems
+    : user?.role === 'Employee'
+      ? employeeNavItems
+      : hrNavItems;
 
   return (
     <div style={{ position: 'sticky', top: 0, zIndex: 100, backgroundColor: '#ffffff', boxShadow: '0 1px 3px 0 rgba(0,0,0,0.05)' }}>
@@ -120,7 +145,14 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
       >
         {/* BRAND / LOGO (BÊN TRÁI) */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-          {selectedCompany?.hasLogo ? (
+          {settings.logoUrl ? (
+            <img
+              src={settings.logoUrl}
+              alt={settings.siteTitle}
+              style={{ maxHeight: '38px', maxWidth: '160px', objectFit: 'contain', cursor: 'pointer' }}
+              onClick={() => onNavigate(isAdmin ? 'admin-dashboard' : 'operator')}
+            />
+          ) : selectedCompany?.hasLogo ? (
             <img
               src={`/api/companies/${selectedCompany.id}/logo?t=${Date.now()}`}
               alt={selectedCompany.name}
@@ -137,7 +169,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
                   width: '36px',
                   height: '36px',
                   borderRadius: '10px',
-                  backgroundColor: 'var(--primary)',
+                  backgroundColor: settings.brandColor || 'var(--primary)',
                   color: '#ffffff',
                   display: 'flex',
                   alignItems: 'center',
@@ -147,14 +179,14 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
                   boxShadow: '0 2px 4px rgba(37, 99, 235, 0.25)'
                 }}
               >
-                SB
+                {settings.siteTitle ? settings.siteTitle.charAt(0).toUpperCase() : 'P'}
               </div>
               <div>
                 <div style={{ fontWeight: 800, fontSize: '15px', color: 'var(--neutral-900)', lineHeight: 1.2 }}>
-                  SUPERBRAIN CHẤM CÔNG
+                  {settings.siteTitle || 'HỆ THỐNG CHẤM CÔNG'}
                 </div>
                 <div style={{ fontSize: '11px', color: 'var(--neutral-500)', fontWeight: 600 }}>
-                  Hệ thống quản lý chấm công & tính lương
+                  {settings.siteSubtitle || 'Nền tảng quản lý chấm công & tính lương'}
                 </div>
               </div>
             </div>
@@ -193,12 +225,17 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
                     padding: '2px 0',
                     maxWidth: '220px'
                   }}
-                  value={selectedCompany?.id ?? ''}
+                  value={selectedCompany ? selectedCompany.id : (isAdmin ? 'ALL' : '')}
                   onChange={(e) => {
-                    const c = companies.find(x => x.id === parseInt(e.target.value));
-                    setSelectedCompany(c ?? null);
+                    if (e.target.value === 'ALL') {
+                      setSelectedCompany(null);
+                    } else {
+                      const c = companies.find(x => x.id === parseInt(e.target.value));
+                      setSelectedCompany(c ?? null);
+                    }
                   }}
                 >
+                  {isAdmin && <option value="ALL">🏢 Tất cả hội sở</option>}
                   {companies.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name} {!c.isActive ? '(Ngưng)' : ''}

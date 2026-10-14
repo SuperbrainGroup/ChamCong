@@ -89,7 +89,19 @@ export const OperatorWorkflowView: React.FC = () => {
   ];
 
   return (
-    <div style={{ padding: '24px', maxWidth: '1400px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+      {/* Tiêu đề chức năng — Tên hội sở */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
+        <div>
+          <h1 style={{ fontSize: '20px', fontWeight: 800, color: 'var(--neutral-900)', margin: 0 }}>
+            Quy Trình Chấm Công & Tính Lương — {selectedCompany ? selectedCompany.name : 'Tất cả hội sở'}
+          </h1>
+          <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: 'var(--neutral-500)' }}>
+            Quy trình 4 bước: Nạp file máy chấm công, kiểm tra giải trình, tính công và chốt kỳ công
+          </p>
+        </div>
+      </div>
+
       {/* Top Header: Period Selector & Actions */}
       <div className="card" style={{ padding: '16px 20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>

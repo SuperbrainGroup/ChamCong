@@ -3,10 +3,14 @@
 :root {
   --font-family: 'Nunito Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   
-  --primary: #1e40af;
-  --primary-hover: #1d4ed8;
+  --primary: #0056B3;
+  --primary-hover: #004494;
   --primary-light: #eff6ff;
-  --primary-text: #1e3a8a;
+  --primary-text: #003d80;
+
+  --sb-gold: #FFC72C;
+  --sb-red: #E31837;
+  --sb-blue: #0056B3;
 
   --secondary: #0f766e;
   --secondary-hover: #115e59;
@@ -20,7 +24,7 @@
   --warning-light: #fffbeb;
   --warning-text: #b45309;
 
-  --danger: #dc2626;
+  --danger: #E31837;
   --danger-light: #fef2f2;
   --danger-text: #b91c1c;
 
@@ -457,3 +461,43 @@ textarea.form-control {
   background: #1d4ed8;
 }
 
+/* ============================================================== */
+/* MOBILE RESPONSIVE OPTIMIZATIONS (PWA & SMARTPHONE SCREENS)      */
+/* ============================================================== */
+@media (max-width: 640px) {
+  /* Tránh Safari iOS tự phóng to màn hình khi chạm vào ô nhập liệu */
+  input[type="text"],
+  input[type="password"],
+  input[type="email"],
+  input[type="number"],
+  input[type="date"],
+  input[type="time"],
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+
+  /* Modals trên điện thoại */
+  .modal-dialog {
+    width: 95% !important;
+    max-width: 95% !important;
+    margin: 10px auto !important;
+  }
+
+  .modal-body {
+    padding: 16px !important;
+    max-height: calc(85vh - 120px) !important;
+  }
+
+  /* Nút bấm dễ chạm bằng ngón tay */
+  .btn {
+    min-height: 42px;
+    font-size: 14px;
+  }
+
+  /* Padding an toàn cho thanh Home indicator trên iPhone */
+  nav[style*="position: fixed"][style*="bottom: 0"] {
+    padding-bottom: max(10px, env(safe-area-inset-bottom)) !important;
+    height: calc(64px + env(safe-area-inset-bottom, 0px)) !important;
+  }
+}

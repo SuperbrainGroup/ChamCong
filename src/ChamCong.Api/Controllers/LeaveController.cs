@@ -48,6 +48,7 @@ public class LeaveController : ControllerBase
     [HttpGet("requests")]
     public async Task<IActionResult> GetRequests(int companyId, [FromQuery] DateTime from, [FromQuery] DateTime to, CancellationToken ct)
     {
+        _access.EnsureStaffOrAbove();
         await _access.EnsureCompanyAsync(companyId, ct);
 
         var list = await _db.LeaveRequests
@@ -83,6 +84,7 @@ public class LeaveController : ControllerBase
     [HttpPost("requests")]
     public async Task<IActionResult> CreateRequest(int companyId, [FromBody] SaveLeaveRequestDto dto, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var emp = await _access.GetEmployeeAsync(dto.EmployeeId, ct);
         var date = dto.Date.Date;
@@ -124,6 +126,7 @@ public class LeaveController : ControllerBase
     [HttpDelete("requests/{id}")]
     public async Task<IActionResult> DeleteRequest(int companyId, int id, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var req = await _db.LeaveRequests.FirstOrDefaultAsync(l => l.Id == id && l.CompanyId == companyId, ct);
         if (req == null) return NotFound();
@@ -138,6 +141,7 @@ public class LeaveController : ControllerBase
     [HttpPost("requests/import-excel")]
     public async Task<IActionResult> ImportRequestsExcel(int companyId, IFormFile file, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
 
         using var stream = file.OpenReadStream();
@@ -237,6 +241,7 @@ public class LeaveController : ControllerBase
     [HttpGet("funds")]
     public async Task<IActionResult> GetFunds(int companyId, [FromQuery] short year, CancellationToken ct)
     {
+        _access.EnsureStaffOrAbove();
         await _access.EnsureCompanyAsync(companyId, ct);
 
         var employees = await _db.Employees
@@ -300,6 +305,7 @@ public class LeaveController : ControllerBase
     [HttpPost("funds")]
     public async Task<IActionResult> SaveFund(int companyId, [FromBody] SaveLeaveFundDto dto, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var emp = await _access.GetEmployeeAsync(dto.EmployeeId, ct);
 
@@ -338,6 +344,19 @@ public class LeaveController : ControllerBase
     {
         await _access.EnsureCompanyAsync(companyId, ct);
         var emp = await _access.GetEmployeeAsync(employeeId, ct);
+
+        if (User.IsEmployee())
+        {
+            var myEmpCode = User.GetEmployeeCode();
+            if (string.IsNullOrEmpty(myEmpCode) || !myEmpCode.Equals(emp.EmployeeCode, StringComparison.OrdinalIgnoreCase))
+            {
+                return StatusCode(403, new { message = "Bạn không có quyền xem sổ cái phép của nhân viên khác." });
+            }
+        }
+        else
+        {
+            _access.EnsureStaffOrAbove();
+        }
 
         var list = await _db.LeaveLedger
             .AsNoTracking()

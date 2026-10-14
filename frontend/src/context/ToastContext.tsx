@@ -35,6 +35,7 @@ export interface ToastContextType {
   warning: (message: string, title?: string, duration?: number) => void;
   info: (message: string, title?: string, duration?: number) => void;
   confirm: (options: ConfirmOptions | string) => Promise<boolean>;
+  addToast: (message: string, type?: 'success' | 'error' | 'warning' | 'info') => void;
 }
 
 const ToastContext = createContext<ToastContextType | undefined>(undefined);
@@ -120,12 +121,20 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setConfirmState(null);
   };
 
+  const addToastHelper = useCallback((message: string, type: 'success' | 'error' | 'warning' | 'info' = 'info') => {
+    if (type === 'success') success(message);
+    else if (type === 'error') error(message);
+    else if (type === 'warning') warning(message);
+    else info(message);
+  }, [success, error, warning, info]);
+
   const contextValue: ToastContextType = {
     success,
     error,
     warning,
     info,
-    confirm
+    confirm,
+    addToast: addToastHelper
   };
 
   globalToast = contextValue;

@@ -21,7 +21,12 @@ public static class ClaimsExtensions
 {
     public static int UserId(this ClaimsPrincipal u) => int.Parse(u.FindFirstValue(ClaimTypes.NameIdentifier) ?? "0");
     public static string Username(this ClaimsPrincipal u) => u.FindFirstValue(ClaimTypes.Name) ?? "";
-    public static bool IsAdmin(this ClaimsPrincipal u) => u.IsInRole(Roles.Admin);
+    public static string GetEmployeeCode(this ClaimsPrincipal u) => u.FindFirstValue("EmployeeCode") ?? "";
+    public static bool IsAdmin(this ClaimsPrincipal u) => u.IsInRole(Roles.Admin) || u.IsInRole("ADMIN");
+    public static bool IsHR(this ClaimsPrincipal u) => IsAdmin(u) || u.IsInRole(Roles.HR) || u.IsInRole("HR") || u.IsInRole("OPERATOR") || u.IsInRole("Operator");
+    public static bool IsOperator(this ClaimsPrincipal u) => IsHR(u);
+    public static bool IsStaffOrAbove(this ClaimsPrincipal u) => IsHR(u);
+    public static bool IsEmployee(this ClaimsPrincipal u) => u.IsInRole(Roles.Employee) || u.IsInRole("EMPLOYEE");
 }
 
 /// <summary>Kiểm soát truy cập theo hội sở (chống BOLA/IDOR): mọi truy vấn theo Id đều đi qua đây.</summary>
@@ -53,6 +58,66 @@ public class AccessService
         if (allowed != null && !allowed.Contains(companyId)) throw AppException.NotFound();
     }
 
+    /// <summary>Danh sách mã hội sở được phép truy cập (null = toàn quyền Admin).</summary>
+    public async Task<HashSet<string>?> AllowedBranchCodesAsync(CancellationToken ct = default)
+    {
+        if (IsAdmin) return null;
+        var allowed = await AllowedCompanyIdsAsync(ct);
+        if (allowed == null) return null;
+        var codes = await _db.Companies.AsNoTracking()
+            .Where(c => allowed.Contains(c.Id))
+            .Select(c => c.Code)
+            .ToListAsync(ct);
+        return codes.ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Bảo vệ chống BOLA: Kiểm tra xem user có quyền quản trị hội sở này không.</summary>
+    public async Task EnsureBranchAsync(string branchCode, CancellationToken ct = default)
+    {
+        if (IsAdmin) return;
+        var allowed = await AllowedBranchCodesAsync(ct);
+        if (allowed != null && !allowed.Contains(branchCode))
+        {
+            throw AppException.Forbidden($"Bạn không có quyền quản lý cấu hình của cơ sở '{branchCode}'.");
+        }
+    }
+
+    /// <summary>Danh sách mã nhân viên thuộc các cơ sở được phân quyền (null = toàn quyền Admin).</summary>
+    public async Task<HashSet<string>?> AllowedEmployeeCodesAsync(CancellationToken ct = default)
+    {
+        if (IsAdmin) return null;
+        var allowedCompanyIds = await AllowedCompanyIdsAsync(ct);
+        if (allowedCompanyIds == null) return null;
+
+        var branchCodes = await AllowedBranchCodesAsync(ct) ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var directEmpCodes = await _db.Employees.AsNoTracking()
+            .Where(e => allowedCompanyIds.Contains(e.CompanyId))
+            .Select(e => e.EmployeeCode)
+            .ToListAsync(ct);
+
+        var assignedEmpCodes = await _db.EmployeeBranchAssignments.AsNoTracking()
+            .Where(a => branchCodes.Contains(a.BranchCode) && (a.ToDate == null || a.ToDate >= DateTime.Today))
+            .Select(a => a.EmployeeCode)
+            .ToListAsync(ct);
+
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var code in directEmpCodes) set.Add(code);
+        foreach (var code in assignedEmpCodes) set.Add(code);
+        return set;
+    }
+
+    /// <summary>Bảo vệ chống BOLA: Kiểm tra xem nhân viên này có thuộc cơ sở của user không.</summary>
+    public async Task EnsureEmployeeCodeAsync(string employeeCode, CancellationToken ct = default)
+    {
+        if (IsAdmin) return;
+        var allowed = await AllowedEmployeeCodesAsync(ct);
+        if (allowed != null && !allowed.Contains(employeeCode))
+        {
+            throw AppException.Forbidden($"Bạn không có quyền quản trị nhân sự '{employeeCode}' thuộc cơ sở khác.");
+        }
+    }
+
     public async Task<Period> GetPeriodAsync(int periodId, bool tracking = false, CancellationToken ct = default)
     {
         var q = tracking ? _db.Periods : _db.Periods.AsNoTracking();
@@ -70,7 +135,22 @@ public class AccessService
 
     public void EnsureAdmin()
     {
-        if (!IsAdmin) throw AppException.Forbidden();
+        if (!IsAdmin) throw AppException.Forbidden("Yêu cầu quyền Quản trị viên (Admin).");
+    }
+
+    public void EnsureHR()
+    {
+        if (!User.IsHR()) throw AppException.Forbidden("Yêu cầu quyền Quản trị nhân sự (HR).");
+    }
+
+    public void EnsureOperatorOrAdmin()
+    {
+        if (!User.IsOperator()) throw AppException.Forbidden("Yêu cầu quyền Vận hành chấm công (Operator) hoặc Quản trị viên.");
+    }
+
+    public void EnsureStaffOrAbove()
+    {
+        if (!User.IsStaffOrAbove()) throw AppException.Forbidden("Tài khoản nhân viên không có quyền truy cập chức năng này.");
     }
 }
 

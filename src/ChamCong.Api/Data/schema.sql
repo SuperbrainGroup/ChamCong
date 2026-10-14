@@ -187,7 +187,7 @@ IF OBJECT_ID(N'dbo.RawPunches', N'U') IS NULL
 CREATE TABLE dbo.RawPunches (
     Id BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT PK_RawPunches PRIMARY KEY,
     PeriodId INT NOT NULL CONSTRAINT FK_RawPunches_Periods REFERENCES dbo.Periods (Id),
-    BatchId INT NOT NULL CONSTRAINT FK_RawPunches_Batches REFERENCES dbo.ImportBatches (Id),
+    BatchId INT NULL CONSTRAINT FK_RawPunches_Batches REFERENCES dbo.ImportBatches (Id),
     EmployeeId INT NULL,
     MachineCode NVARCHAR(30) NOT NULL,
     MachineName NVARCHAR(150) NULL,
@@ -447,4 +447,418 @@ BEGIN
         (@CompId, N'Off', N'Nghỉ tuần', 0, 0, 0, 0, 0, 0, 0, N'94a3b8', 14, 1);
 END
 GO
+
+-- =========================================================================
+-- PHASE 2 (ESS & CHẤM CÔNG DI ĐỘNG PWA) — SQL Server 2008 COMPATIBLE
+-- =========================================================================
+
+-- 1. Bổ sung các cột mở rộng cho bảng Phase 1
+IF OBJECT_ID(N'dbo.Employees', N'U') IS NOT NULL
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'Employees' AND COLUMN_NAME = N'AttendanceSource')
+        ALTER TABLE dbo.Employees ADD AttendanceSource NVARCHAR(10) NOT NULL CONSTRAINT DF_Employees_Source DEFAULT (N'APP');
+END
+GO
+
+IF OBJECT_ID(N'dbo.RawPunches', N'U') IS NOT NULL
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'RawPunches' AND COLUMN_NAME = N'Source')
+        ALTER TABLE dbo.RawPunches ADD Source NVARCHAR(15) NOT NULL CONSTRAINT DF_RawPunches_Source DEFAULT (N'FILE');
+END
+GO
+
+IF OBJECT_ID(N'dbo.Users', N'U') IS NOT NULL
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'Users' AND COLUMN_NAME = N'EmployeeCode')
+        ALTER TABLE dbo.Users ADD EmployeeCode NVARCHAR(30) NULL;
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'Users' AND COLUMN_NAME = N'LockedUntilUtc')
+        ALTER TABLE dbo.Users ADD LockedUntilUtc DATETIME2(0) NULL;
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'Users' AND COLUMN_NAME = N'PrivacyConsentAtUtc')
+        ALTER TABLE dbo.Users ADD PrivacyConsentAtUtc DATETIME2(0) NULL;
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'Users' AND COLUMN_NAME = N'PrivacyConsentVer')
+        ALTER TABLE dbo.Users ADD PrivacyConsentVer VARCHAR(20) NULL;
+END
+GO
+
+-- 2. Phân vai trò & Phạm vi quản trị HCNS
+IF OBJECT_ID(N'dbo.tbl_UserRoles', N'U') IS NULL
+CREATE TABLE dbo.tbl_UserRoles (
+    UserID   INT         NOT NULL,
+    RoleCode VARCHAR(20) NOT NULL,
+    CONSTRAINT PK_UserRoles PRIMARY KEY (UserID, RoleCode),
+    CONSTRAINT CK_UserRoles CHECK (RoleCode IN ('EMPLOYEE','HR','ADMIN','Operator')),
+    CONSTRAINT FK_UserRoles_User FOREIGN KEY (UserID) REFERENCES dbo.Users(Id) ON DELETE CASCADE
+);
+GO
+
+IF OBJECT_ID(N'dbo.tbl_HrBranchScopes', N'U') IS NULL
+CREATE TABLE dbo.tbl_HrBranchScopes (
+    UserID     INT          NOT NULL,
+    BranchCode NVARCHAR(30) NOT NULL,
+    FromDate   DATE         NOT NULL,
+    ToDate     DATE         NULL,
+    CONSTRAINT PK_HrScope PRIMARY KEY (UserID, BranchCode, FromDate),
+    CONSTRAINT FK_HrScope_User FOREIGN KEY (UserID) REFERENCES dbo.Users(Id) ON DELETE CASCADE
+);
+GO
+
+-- 3. Thiết bị chấm công 2 khe (Mobile / PC) & Refresh Tokens xoay vòng
+IF OBJECT_ID(N'dbo.tbl_EmployeeDevices', N'U') IS NULL
+CREATE TABLE dbo.tbl_EmployeeDevices (
+    DeviceBindingID    INT IDENTITY(1,1) PRIMARY KEY,
+    EmployeeCode       NVARCHAR(30) NOT NULL,
+    DeviceType         VARCHAR(10)  NOT NULL,       -- 'MOBILE' | 'PC'
+    SecretHash         CHAR(64)     NOT NULL,       -- SHA-256 của server secret token
+    FingerprintHash    CHAR(64)     NULL,
+    DeviceName         NVARCHAR(100) NULL,
+    OperatingSystem    VARCHAR(50)  NULL,
+    BrowserInfo        VARCHAR(100) NULL,
+    RegisteredPublicIP VARCHAR(45)  NULL,
+    ApprovalStatus     VARCHAR(10)  NOT NULL CONSTRAINT DF_Dev_Status DEFAULT ('PENDING'),
+    IsActiveSlot       BIT          NOT NULL CONSTRAINT DF_Dev_Slot DEFAULT (1),
+    RequestedAtUtc     DATETIME2(0) NOT NULL CONSTRAINT DF_Dev_Req DEFAULT (SYSUTCDATETIME()),
+    DecidedByUserID    INT          NULL,
+    DecidedAtUtc       DATETIME2(0) NULL,
+    DecisionNote       NVARCHAR(255) NULL,
+    LastUsedAtUtc      DATETIME2(0) NULL,
+    LastUsedPublicIP   VARCHAR(45)  NULL,
+    CONSTRAINT CK_Dev_Type   CHECK (DeviceType IN ('MOBILE','PC')),
+    CONSTRAINT CK_Dev_Status CHECK (ApprovalStatus IN ('PENDING','APPROVED','REJECTED','REVOKED')),
+    CONSTRAINT FK_Dev_Decider FOREIGN KEY (DecidedByUserID) REFERENCES dbo.Users(Id)
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot')
+CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_ActiveSlot ON dbo.tbl_EmployeeDevices(EmployeeCode, DeviceType) WHERE IsActiveSlot = 1;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSecret')
+CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_ActiveSecret ON dbo.tbl_EmployeeDevices(SecretHash) WHERE IsActiveSlot = 1;
+GO
+
+-- Ràng buộc: Mỗi địa chỉ MAC của máy tính chỉ được gán cho 1 nhân viên duy nhất (Chống chấm công hộ)
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UQ_EmployeeDevices_ActiveMac')
+CREATE UNIQUE NONCLUSTERED INDEX UQ_EmployeeDevices_ActiveMac ON dbo.tbl_EmployeeDevices(FingerprintHash) WHERE FingerprintHash IS NOT NULL AND IsActiveSlot = 1 AND DeviceType = 'PC';
+GO
+
+IF OBJECT_ID(N'dbo.tbl_RefreshTokens', N'U') IS NULL
+CREATE TABLE dbo.tbl_RefreshTokens (
+    TokenID         BIGINT IDENTITY(1,1) PRIMARY KEY,
+    UserID          INT          NOT NULL,
+    DeviceBindingID INT          NULL,
+    TokenHash       CHAR(64)     NOT NULL,
+    ExpiresAtUtc    DATETIME2(0) NOT NULL,
+    RevokedAtUtc    DATETIME2(0) NULL,
+    CreatedAtUtc    DATETIME2(0) NOT NULL CONSTRAINT DF_RT_Created DEFAULT (SYSUTCDATETIME()),
+    CreatedPublicIP VARCHAR(45)  NULL,
+    CONSTRAINT UQ_RT_TokenHash UNIQUE (TokenHash),
+    CONSTRAINT FK_RT_User FOREIGN KEY (UserID) REFERENCES dbo.Users(Id) ON DELETE CASCADE,
+    CONSTRAINT FK_RT_Dev  FOREIGN KEY (DeviceBindingID) REFERENCES dbo.tbl_EmployeeDevices(DeviceBindingID)
+);
+GO
+
+-- 4. Phân công hội sở, Vị trí Geofence & Mạng Public IP
+IF OBJECT_ID(N'dbo.tbl_EmployeeBranchAssignments', N'U') IS NULL
+CREATE TABLE dbo.tbl_EmployeeBranchAssignments (
+    AssignmentID INT IDENTITY(1,1) PRIMARY KEY,
+    EmployeeCode NVARCHAR(30) NOT NULL,
+    BranchCode   NVARCHAR(30) NOT NULL,
+    IsPrimary    BIT          NOT NULL CONSTRAINT DF_EBA_Primary DEFAULT (0),
+    FromDate     DATE         NOT NULL,
+    ToDate       DATE         NULL
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_EBA_Primary')
+CREATE UNIQUE NONCLUSTERED INDEX UX_EBA_Primary ON dbo.tbl_EmployeeBranchAssignments(EmployeeCode) WHERE IsPrimary = 1 AND ToDate IS NULL;
+GO
+
+IF OBJECT_ID(N'dbo.tbl_BranchLocations', N'U') IS NULL
+CREATE TABLE dbo.tbl_BranchLocations (
+    LocationID   INT IDENTITY(1,1) PRIMARY KEY,
+    BranchCode   NVARCHAR(30)  NOT NULL,
+    LocationName NVARCHAR(100) NOT NULL,
+    Latitude     DECIMAL(10,7) NOT NULL,
+    Longitude    DECIMAL(10,7) NOT NULL,
+    RadiusMeters INT           NOT NULL CONSTRAINT DF_Loc_Radius DEFAULT (50),
+    IsActive     BIT           NOT NULL CONSTRAINT DF_Loc_Active DEFAULT (1),
+    CONSTRAINT CK_Loc_Radius CHECK (RadiusMeters BETWEEN 20 AND 500)
+);
+GO
+
+IF OBJECT_ID(N'dbo.tbl_BranchNetworks', N'U') IS NULL
+CREATE TABLE dbo.tbl_BranchNetworks (
+    NetworkID       INT IDENTITY(1,1) PRIMARY KEY,
+    BranchCode      NVARCHAR(30)  NOT NULL,
+    Cidr            VARCHAR(50)   NOT NULL,
+    Description     NVARCHAR(100) NULL,
+    IsActive        BIT           NOT NULL CONSTRAINT DF_Net_Active DEFAULT (1),
+    ValidFrom       DATE          NOT NULL,
+    ValidTo         DATE          NULL,
+    CreatedByUserID INT           NULL,
+    CreatedAtUtc    DATETIME2(0)  NOT NULL CONSTRAINT DF_Net_Created DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT UQ_Net_Branch_Cidr UNIQUE (BranchCode, Cidr),
+    CONSTRAINT FK_Net_User FOREIGN KEY (CreatedByUserID) REFERENCES dbo.Users(Id)
+);
+GO
+
+-- 5. Lượt bấm chấm công Web/Mobile & Bảng quyết định
+IF OBJECT_ID(N'dbo.tbl_WebAttendanceLogs', N'U') IS NULL
+CREATE TABLE dbo.tbl_WebAttendanceLogs (
+    WebLogID           BIGINT IDENTITY(1,1) PRIMARY KEY,
+    ClientRequestId    UNIQUEIDENTIFIER NOT NULL,
+    EmployeeCode       NVARCHAR(30)  NOT NULL,
+    DeviceBindingID    INT           NOT NULL,
+    Channel            VARCHAR(10)   NOT NULL,             -- 'MOBILE_PWA' | 'PC_WEB'
+    CheckTimeUtc       DATETIME2(3)  NOT NULL CONSTRAINT DF_Log_Time DEFAULT (SYSUTCDATETIME()),
+    WorkDate           DATE          NOT NULL,
+    DetectedBranchCode NVARCHAR(30)  NULL,
+    CheckinPolicy      VARCHAR(25)   NOT NULL,
+    Latitude           DECIMAL(10,7) NULL,
+    Longitude          DECIMAL(10,7) NULL,
+    GpsAccuracyMeters  DECIMAL(7,2)  NULL,
+    DistanceMeters     DECIMAL(9,2)  NULL,
+    ClientPublicIP     VARCHAR(45)   NOT NULL,
+    IpOk               BIT           NULL,
+    GpsState           VARCHAR(8)    NOT NULL,             -- OK | OUT | LOW_ACC | MISSING | NA
+    VerificationStatus VARCHAR(15)   NOT NULL,             -- VALID | REVIEW | OUT_OF_OFFICE
+    ReasonCode         VARCHAR(30)   NULL,                 -- GPS_DRIFT | OFF_NETWORK | OUTSIDE | WRONG_BRANCH | DEVICE_REJECTED
+    ReviewState        VARCHAR(10)   NOT NULL CONSTRAINT DF_Log_RevState DEFAULT ('NONE'),
+    ReviewedByUserID   INT           NULL,
+    ReviewedAtUtc      DATETIME2(0)  NULL,
+    ReviewNote         NVARCHAR(255) NULL,
+    UserAgent          NVARCHAR(300) NULL,
+    CONSTRAINT UQ_Log_Req UNIQUE (ClientRequestId),
+    CONSTRAINT CK_Log_Channel CHECK (Channel IN ('MOBILE_PWA','PC_WEB')),
+    CONSTRAINT CK_Log_Gps     CHECK (GpsState IN ('OK','OUT','LOW_ACC','MISSING','NA')),
+    CONSTRAINT CK_Log_Verif   CHECK (VerificationStatus IN ('VALID','REVIEW','OUT_OF_OFFICE')),
+    CONSTRAINT CK_Log_Review  CHECK (ReviewState IN ('NONE','PENDING','ACCEPTED','REJECTED')),
+    CONSTRAINT FK_Log_Dev     FOREIGN KEY (DeviceBindingID) REFERENCES dbo.tbl_EmployeeDevices(DeviceBindingID),
+    CONSTRAINT FK_Log_RevUser FOREIGN KEY (ReviewedByUserID) REFERENCES dbo.Users(Id)
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Log_Emp_Date')
+CREATE NONCLUSTERED INDEX IX_Log_Emp_Date ON dbo.tbl_WebAttendanceLogs(EmployeeCode, WorkDate, CheckTimeUtc);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Log_Review')
+CREATE NONCLUSTERED INDEX IX_Log_Review ON dbo.tbl_WebAttendanceLogs(ReviewState, WorkDate);
+GO
+
+-- 6. Gộp dữ liệu ngày & Điều chỉnh giờ đã duyệt
+IF OBJECT_ID(N'dbo.tbl_DailyPunchSummary', N'U') IS NULL
+CREATE TABLE dbo.tbl_DailyPunchSummary (
+    EmployeeCode     NVARCHAR(30) NOT NULL,
+    WorkDate         DATE         NOT NULL,
+    InTime           TIME(0)      NULL,
+    OutTime          TIME(0)      NULL,
+    Source           VARCHAR(12)  NOT NULL CONSTRAINT DF_DPS_Source DEFAULT ('APP'),
+    InLogID          BIGINT       NULL,
+    OutLogID         BIGINT       NULL,
+    UsedPunchCount   INT          NOT NULL CONSTRAINT DF_DPS_PunchCount DEFAULT (0),
+    HasPendingReview BIT          NOT NULL CONSTRAINT DF_DPS_Pending DEFAULT (0),
+    BuiltAtUtc       DATETIME2(0) NOT NULL CONSTRAINT DF_DPS_Built DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT PK_DailyPunch PRIMARY KEY (EmployeeCode, WorkDate)
+);
+GO
+
+IF OBJECT_ID(N'dbo.tbl_TimeAdjustments', N'U') IS NULL
+CREATE TABLE dbo.tbl_TimeAdjustments (
+    AdjustmentID    INT IDENTITY(1,1) PRIMARY KEY,
+    EmployeeCode    NVARCHAR(30) NOT NULL,
+    WorkDate        DATE         NOT NULL,
+    AdjInTime       TIME(0)      NULL,
+    AdjOutTime      TIME(0)      NULL,
+    SourceRequestID INT          NOT NULL,
+    IsActive        BIT          NOT NULL CONSTRAINT DF_Adj_Active DEFAULT (1),
+    CreatedAtUtc    DATETIME2(0) NOT NULL CONSTRAINT DF_Adj_Created DEFAULT (SYSUTCDATETIME())
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Adj_Active')
+CREATE UNIQUE NONCLUSTERED INDEX UX_Adj_Active ON dbo.tbl_TimeAdjustments(EmployeeCode, WorkDate) WHERE IsActive = 1;
+GO
+
+-- 7. Đơn từ (Nghỉ phép / Giải trình) & File minh chứng
+IF OBJECT_ID(N'dbo.tbl_EmployeeRequests', N'U') IS NULL
+CREATE TABLE dbo.tbl_EmployeeRequests (
+    RequestID        INT IDENTITY(1,1) PRIMARY KEY,
+    RequestType      VARCHAR(15)   NOT NULL,        -- 'LEAVE' | 'REGULARIZATION'
+    EmployeeCode     NVARCHAR(30)  NOT NULL,
+    LeaveCode        NVARCHAR(10)  NULL,
+    FromDate         DATE          NOT NULL,
+    ToDate           DATE          NOT NULL,
+    DayPart          VARCHAR(10)   NULL,            -- FULL | MORNING | AFTERNOON
+    DaysRequested    DECIMAL(4,1)  NOT NULL,
+    ReasonCode       VARCHAR(30)   NULL,
+    Reason           NVARCHAR(500) NOT NULL,
+    ActualTimeIn     TIME(0)       NULL,
+    ActualTimeOut    TIME(0)       NULL,
+    Status           VARCHAR(16)   NOT NULL CONSTRAINT DF_Req_Status DEFAULT ('PENDING_HR'),
+    HRUserID         INT           NULL,
+    HRDecidedAtUtc   DATETIME2(0)  NULL,
+    HRNote           NVARCHAR(255) NULL,
+    CancelledAtUtc   DATETIME2(0)  NULL,
+    CreatedAtUtc     DATETIME2(0)  NOT NULL CONSTRAINT DF_Req_Created DEFAULT (SYSUTCDATETIME()),
+    UpdatedAtUtc     DATETIME2(0)  NOT NULL CONSTRAINT DF_Req_Updated DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT CK_Req_Type   CHECK (RequestType IN ('LEAVE','REGULARIZATION')),
+    CONSTRAINT CK_Req_Status CHECK (Status IN ('PENDING_HR','APPROVED','REJECTED','CANCELLED')),
+    CONSTRAINT CK_Req_Dates  CHECK (FromDate <= ToDate),
+    CONSTRAINT FK_Req_HRUser FOREIGN KEY (HRUserID) REFERENCES dbo.Users(Id)
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Req_Status')
+CREATE NONCLUSTERED INDEX IX_Req_Status ON dbo.tbl_EmployeeRequests(Status, FromDate);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Req_Emp')
+CREATE NONCLUSTERED INDEX IX_Req_Emp ON dbo.tbl_EmployeeRequests(EmployeeCode, FromDate, ToDate);
+GO
+
+IF OBJECT_ID(N'dbo.tbl_RequestAttachments', N'U') IS NULL
+CREATE TABLE dbo.tbl_RequestAttachments (
+    AttachmentID     INT IDENTITY(1,1) PRIMARY KEY,
+    RequestID        INT          NOT NULL,
+    OriginalFileName NVARCHAR(200) NOT NULL,
+    StoredFileName   VARCHAR(100) NOT NULL,
+    MimeType         VARCHAR(50)  NOT NULL,
+    FileSizeBytes    INT          NOT NULL,
+    Sha256           CHAR(64)     NOT NULL,
+    UploadedAtUtc    DATETIME2(0) NOT NULL CONSTRAINT DF_Att_Created DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT FK_Att_Req FOREIGN KEY (RequestID) REFERENCES dbo.tbl_EmployeeRequests(RequestID) ON DELETE CASCADE
+);
+GO
+
+-- 8. Công bố bảng công phiên bản snapshot bất biến & Khiếu nại
+IF OBJECT_ID(N'dbo.tbl_TimesheetPublications', N'U') IS NULL
+CREATE TABLE dbo.tbl_TimesheetPublications (
+    PublicationID     INT IDENTITY(1,1) PRIMARY KEY,
+    PeriodID          INT          NOT NULL,
+    BranchCode        NVARCHAR(30) NOT NULL,
+    VersionNo         INT          NOT NULL CONSTRAINT DF_Pub_Ver DEFAULT (1),
+    IsCurrent         BIT          NOT NULL CONSTRAINT DF_Pub_Current DEFAULT (1),
+    PublishedByUserID INT          NOT NULL,
+    PublishedAtUtc    DATETIME2(0) NOT NULL CONSTRAINT DF_Pub_Created DEFAULT (SYSUTCDATETIME()),
+    RetractedAtUtc    DATETIME2(0) NULL,
+    Note              NVARCHAR(255) NULL,
+    CONSTRAINT UQ_Pub_Version UNIQUE (PeriodID, BranchCode, VersionNo),
+    CONSTRAINT FK_Pub_Period FOREIGN KEY (PeriodID) REFERENCES dbo.Periods(Id),
+    CONSTRAINT FK_Pub_User   FOREIGN KEY (PublishedByUserID) REFERENCES dbo.Users(Id)
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Pub_Current')
+CREATE UNIQUE NONCLUSTERED INDEX UX_Pub_Current ON dbo.tbl_TimesheetPublications(PeriodID, BranchCode) WHERE IsCurrent = 1;
+GO
+
+IF OBJECT_ID(N'dbo.tbl_TimesheetPublishedLines', N'U') IS NULL
+CREATE TABLE dbo.tbl_TimesheetPublishedLines (
+    LineID            INT IDENTITY(1,1) PRIMARY KEY,
+    PublicationID     INT          NOT NULL,
+    EmployeeCode      NVARCHAR(30) NOT NULL,
+    DailyCodes        VARCHAR(400) NOT NULL,
+    WorkDays          DECIMAL(5,1) NOT NULL,
+    HolidayDays       DECIMAL(5,1) NOT NULL,
+    AnnualLeaveDays   DECIMAL(5,1) NOT NULL,
+    PaidLeaveDays     DECIMAL(5,1) NOT NULL,
+    UnpaidLeaveDays   DECIMAL(5,1) NOT NULL,
+    PaidDays          DECIMAL(5,1) NOT NULL,
+    LateEarlyMinutes  INT          NOT NULL,
+    LeaveBalanceAfter DECIMAL(5,1) NULL,
+    Note              NVARCHAR(500) NULL,
+    CONSTRAINT UQ_PubLine UNIQUE (PublicationID, EmployeeCode),
+    CONSTRAINT FK_PubLine_Pub FOREIGN KEY (PublicationID) REFERENCES dbo.tbl_TimesheetPublications(PublicationID) ON DELETE CASCADE
+);
+GO
+
+IF OBJECT_ID(N'dbo.tbl_TimesheetDisputes', N'U') IS NULL
+CREATE TABLE dbo.tbl_TimesheetDisputes (
+    DisputeID     INT IDENTITY(1,1) PRIMARY KEY,
+    PublicationID INT           NOT NULL,
+    EmployeeCode  NVARCHAR(30)  NOT NULL,
+    WorkDate      DATE          NULL,
+    Content       NVARCHAR(1000) NOT NULL,
+    Status        VARCHAR(10)   NOT NULL CONSTRAINT DF_Disp_Status DEFAULT ('OPEN'),
+    HRUserID      INT           NULL,
+    HRResponse    NVARCHAR(500) NULL,
+    CreatedAtUtc  DATETIME2(0)  NOT NULL CONSTRAINT DF_Disp_Created DEFAULT (SYSUTCDATETIME()),
+    ResolvedAtUtc DATETIME2(0)  NULL,
+    CONSTRAINT CK_Disp_Status CHECK (Status IN ('OPEN','ACCEPTED','REJECTED')),
+    CONSTRAINT FK_Disp_Pub    FOREIGN KEY (PublicationID) REFERENCES dbo.tbl_TimesheetPublications(PublicationID),
+    CONSTRAINT FK_Disp_HRUser FOREIGN KEY (HRUserID) REFERENCES dbo.Users(Id)
+);
+GO
+
+-- 9. Thông báo, Cảnh báo HCNS & Nhật ký an ninh
+IF OBJECT_ID(N'dbo.tbl_Notifications', N'U') IS NULL
+CREATE TABLE dbo.tbl_Notifications (
+    NotificationID BIGINT IDENTITY(1,1) PRIMARY KEY,
+    UserID         INT           NOT NULL,
+    Title          NVARCHAR(120) NOT NULL,
+    Body           NVARCHAR(300) NULL,
+    LinkType       VARCHAR(20)   NULL,
+    LinkID         INT           NULL,
+    IsRead         BIT           NOT NULL CONSTRAINT DF_Noti_Read DEFAULT (0),
+    CreatedAtUtc   DATETIME2(0)  NOT NULL CONSTRAINT DF_Noti_Created DEFAULT (SYSUTCDATETIME()),
+    CONSTRAINT FK_Noti_User FOREIGN KEY (UserID) REFERENCES dbo.Users(Id) ON DELETE CASCADE
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Noti_User')
+CREATE NONCLUSTERED INDEX IX_Noti_User ON dbo.tbl_Notifications(UserID, IsRead, CreatedAtUtc);
+GO
+
+IF OBJECT_ID(N'dbo.tbl_HrAlerts', N'U') IS NULL
+CREATE TABLE dbo.tbl_HrAlerts (
+    AlertID       INT IDENTITY(1,1) PRIMARY KEY,
+    AlertType     VARCHAR(25)   NOT NULL,           -- IP_DRIFT | REPEAT_FLAG | DEVICE_ANOMALY
+    BranchCode    NVARCHAR(30)  NULL,
+    EmployeeCode  NVARCHAR(30)  NULL,
+    Detail        NVARCHAR(500) NOT NULL,
+    Status        VARCHAR(10)   NOT NULL CONSTRAINT DF_Alert_Status DEFAULT ('OPEN'),
+    CreatedAtUtc  DATETIME2(0)  NOT NULL CONSTRAINT DF_Alert_Created DEFAULT (SYSUTCDATETIME()),
+    AckedByUserID INT           NULL,
+    AckedAtUtc    DATETIME2(0)  NULL,
+    CONSTRAINT FK_Alert_User FOREIGN KEY (AckedByUserID) REFERENCES dbo.Users(Id)
+);
+GO
+
+IF OBJECT_ID(N'dbo.tbl_SecurityAuditLog', N'U') IS NULL
+CREATE TABLE dbo.tbl_SecurityAuditLog (
+    LogID        BIGINT IDENTITY(1,1) PRIMARY KEY,
+    UserID       INT           NULL,
+    EventType    VARCHAR(40)   NOT NULL,
+    Detail       NVARCHAR(500) NULL,
+    PublicIP     VARCHAR(45)   NULL,
+    UserAgent    NVARCHAR(300) NULL,
+    CreatedAtUtc DATETIME2(0)  NOT NULL CONSTRAINT DF_Sec_Created DEFAULT (SYSUTCDATETIME())
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Audit_Time')
+CREATE NONCLUSTERED INDEX IX_Audit_Time ON dbo.tbl_SecurityAuditLog(CreatedAtUtc, EventType);
+GO
+
+IF OBJECT_ID(N'dbo.tbl_PlatformSettings', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.tbl_PlatformSettings (
+        SettingKey   VARCHAR(50)   NOT NULL PRIMARY KEY,
+        SettingValue NVARCHAR(MAX) NULL,
+        Description  NVARCHAR(200) NULL,
+        UpdatedAtUtc DATETIME2(0)  NOT NULL CONSTRAINT DF_Platform_Updated DEFAULT (SYSUTCDATETIME()),
+        UpdatedBy    NVARCHAR(100) NULL
+    );
+
+    INSERT INTO dbo.tbl_PlatformSettings (SettingKey, SettingValue, Description)
+    VALUES 
+    ('SITE_TITLE', N'Hệ Thống Chấm Công Thông Minh', N'Tiêu đề hiển thị nền tảng'),
+    ('SITE_SUBTITLE', N'Nền tảng Quản trị Chấm công & Nhân sự', N'Mô tả phụ'),
+    ('LOGO_URL', N'', N'Đường dẫn logo thương hiệu'),
+    ('FAVICON_URL', N'', N'Đường dẫn biểu tượng website'),
+    ('COPYRIGHT_TEXT', N'© 2026 Bản quyền thuộc về Nền tảng Chấm công Doanh nghiệp.', N'Thông tin bản quyền chân trang');
+END
+GO
+
 

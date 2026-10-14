@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ToastProvider } from './context/ToastContext';
+import { PlatformProvider } from './context/PlatformContext';
 import { Navbar } from './components/Navbar';
 import { LoginView } from './views/LoginView';
 import { ChangePasswordModal } from './views/ChangePasswordModal';
@@ -14,6 +15,10 @@ import { ParametersManager } from './views/admin/ParametersManager';
 import { CalendarManager } from './views/admin/CalendarManager';
 import { LeaveManager } from './views/admin/LeaveManager';
 import { AuditLogsViewer } from './views/admin/AuditLogsViewer';
+import { HrAttendanceView } from './views/admin/HrAttendanceView';
+import { PlatformSettingsManager } from './views/admin/PlatformSettingsManager';
+import { EmployeePortalView } from './views/ess/EmployeePortalView';
+import { PcCheckinView } from './views/ess/PcCheckinView';
 
 const MainLayout: React.FC = () => {
   const { user, loading } = useAuth();
@@ -22,24 +27,48 @@ const MainLayout: React.FC = () => {
     if (savedUser) {
       try {
         const u = JSON.parse(savedUser);
+        if (u.role === 'Employee') return 'ess-portal';
         return u.role === 'Admin' ? 'admin-dashboard' : 'operator';
       } catch {}
     }
     return 'operator';
   });
   const [showManualChangePwd, setShowManualChangePwd] = useState<boolean>(false);
+  const [isMobileScreen, setIsMobileScreen] = useState<boolean>(() => window.innerWidth <= 768);
+  const [forceMobileView, setForceMobileView] = useState<boolean>(false);
 
-  const allowedOperatorViews = [
+  React.useEffect(() => {
+    const handleResize = () => {
+      setIsMobileScreen(window.innerWidth <= 768);
+    };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const allowedHrViews = [
+    'admin-dashboard',
     'operator',
+    'admin-hr-attendance',
+    'admin-users',
     'admin-employees',
     'admin-calendar',
     'admin-leave',
-    'admin-codes'
+    'admin-codes',
+    'admin-parameters',
+    'ess-portal',
+    'ess-history',
+    'ess-requests',
+    'ess-devices'
   ];
 
   React.useEffect(() => {
     if (user) {
-      if (user.role === 'Operator' && !allowedOperatorViews.includes(currentView)) {
+      if (user.role === 'Employee') {
+        const allowedEss = ['ess-portal', 'ess-history', 'ess-requests', 'ess-devices'];
+        if (!allowedEss.includes(currentView)) {
+          setCurrentView('ess-portal');
+        }
+      } else if (user.role === 'HR' && !allowedHrViews.includes(currentView)) {
         setCurrentView('operator');
       }
     }
@@ -89,11 +118,36 @@ const MainLayout: React.FC = () => {
   }
 
   const handleBack = () => {
-    setCurrentView(user.role === 'Admin' ? 'admin-dashboard' : 'operator');
+    setCurrentView(user.role === 'Admin' ? 'admin-dashboard' : user.role === 'Employee' ? 'ess-portal' : 'operator');
   };
 
   const renderView = () => {
-    if (user.role === 'Operator' && !allowedOperatorViews.includes(currentView)) {
+    const isMobileMode = (isMobileScreen || forceMobileView);
+
+    // Xử lý các màn hình tự chấm công của nhân viên (hoặc xem thử)
+    if (currentView.startsWith('ess-') || user.role === 'Employee') {
+      if (!isMobileMode) {
+        const tabMap: Record<string, 'checkin' | 'history' | 'requests' | 'device'> = {
+          'ess-portal': 'checkin',
+          'ess-history': 'history',
+          'ess-requests': 'requests',
+          'ess-devices': 'device'
+        };
+        return (
+          <PcCheckinView
+            initialTab={tabMap[currentView] || 'checkin'}
+            onSwitchToMobile={() => setForceMobileView(true)}
+            onNavigate={(v) => {
+              setCurrentView(v);
+              setForceMobileView(false);
+            }}
+          />
+        );
+      }
+      return <EmployeePortalView />;
+    }
+
+    if (user.role === 'HR' && !allowedHrViews.includes(currentView)) {
       return <OperatorWorkflowView />;
     }
 
@@ -102,6 +156,8 @@ const MainLayout: React.FC = () => {
         return <OperatorWorkflowView />;
       case 'admin-dashboard':
         return <AdminDashboard onNavigate={(v) => setCurrentView(v)} />;
+      case 'admin-hr-attendance':
+        return <HrAttendanceView />;
       case 'admin-companies':
         return <CompaniesManager onBack={handleBack} />;
       case 'admin-users':
@@ -118,10 +174,14 @@ const MainLayout: React.FC = () => {
         return <LeaveManager onBack={handleBack} />;
       case 'admin-audit':
         return <AuditLogsViewer onBack={handleBack} />;
+      case 'admin-platform':
+        return <PlatformSettingsManager />;
       default:
         return <OperatorWorkflowView />;
     }
   };
+
+  const isEssMobileOnly = (currentView.startsWith('ess-') || user.role === 'Employee') && (isMobileScreen || forceMobileView);
 
   return (
     <div style={{
@@ -131,13 +191,91 @@ const MainLayout: React.FC = () => {
       backgroundColor: '#f8fafc',
       fontFamily: "'Nunito Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
     }}>
-      <Navbar
-        currentView={currentView}
-        onNavigate={(v) => setCurrentView(v)}
-        onOpenChangePassword={() => setShowManualChangePwd(true)}
-      />
+      {/* Hiển thị Navbar trên PC (kể cả nhân viên), chỉ ẩn khi đang hiển thị giao diện Mobile PWA hẹp */}
+      {!isEssMobileOnly && (
+        <Navbar
+          currentView={currentView}
+          onNavigate={(v) => {
+            setCurrentView(v);
+            setForceMobileView(false);
+          }}
+          onOpenChangePassword={() => setShowManualChangePwd(true)}
+        />
+      )}
 
-      <main style={{ flex: 1, padding: currentView === 'operator' ? '0' : '24px', maxWidth: currentView === 'operator' ? '100%' : '1400px', width: '100%', margin: '0 auto' }}>
+      {/* Banner hỗ trợ khi người dùng chủ động xem dạng Mobile trên PC */}
+      {forceMobileView && (
+        <div style={{
+          backgroundColor: '#0056B3',
+          color: '#ffffff',
+          padding: '8px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          fontSize: '13px',
+          fontWeight: 600,
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+          zIndex: 99
+        }}>
+          <div>📱 Đang xem trước giao diện Mobile (PWA). Bạn có thể quay lại giao diện Web PC bất cứ lúc nào.</div>
+          <button
+            onClick={() => setForceMobileView(false)}
+            style={{
+              backgroundColor: '#FFC72C',
+              color: '#0F172A',
+              border: 'none',
+              borderRadius: '6px',
+              padding: '4px 12px',
+              fontSize: '12px',
+              fontWeight: 700,
+              cursor: 'pointer'
+            }}
+          >
+            💻 Trở về giao diện PC
+          </button>
+        </div>
+      )}
+
+      {/* Banner nhỏ hỗ trợ Admin / Quản lý khi xem thử Cổng Tự Chấm Công */}
+      {currentView === 'ess-portal' && user.role !== 'Employee' && !forceMobileView && (
+        <div style={{
+          backgroundColor: '#0056B3',
+          color: '#ffffff',
+          padding: '8px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          fontSize: '13px',
+          fontWeight: 600,
+          boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+          zIndex: 99
+        }}>
+          <div>💻 Chấm công cá nhân trên PC (Xác thực MAC Address).</div>
+          <button
+            onClick={handleBack}
+            style={{
+              backgroundColor: '#FFC72C',
+              color: '#0F172A',
+              border: 'none',
+              borderRadius: '6px',
+              padding: '4px 12px',
+              fontSize: '12px',
+              fontWeight: 700,
+              cursor: 'pointer'
+            }}
+          >
+            ← Quay lại Bảng Quản Trị
+          </button>
+        </div>
+      )}
+
+      <main style={{ 
+        flex: 1, 
+        padding: isEssMobileOnly ? '0' : '24px', 
+        maxWidth: isEssMobileOnly ? '100%' : '1400px', 
+        width: '100%', 
+        margin: '0 auto' 
+      }}>
         {renderView()}
       </main>
 
@@ -153,10 +291,12 @@ const MainLayout: React.FC = () => {
 
 export default function App() {
   return (
-    <ToastProvider>
-      <AuthProvider>
-        <MainLayout />
-      </AuthProvider>
-    </ToastProvider>
+    <PlatformProvider>
+      <ToastProvider>
+        <AuthProvider>
+          <MainLayout />
+        </AuthProvider>
+      </ToastProvider>
+    </PlatformProvider>
   );
 }

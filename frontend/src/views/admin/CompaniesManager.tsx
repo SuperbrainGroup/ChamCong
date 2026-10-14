@@ -10,7 +10,7 @@ interface CompaniesManagerProps {
 }
 
 export const CompaniesManager: React.FC<CompaniesManagerProps> = ({ onBack }) => {
-  const { refreshCompanies } = useAuth();
+  const { refreshCompanies, selectedCompany } = useAuth();
   const toast = useToast();
   const [companies, setCompanies] = useState<Company[]>([]);
   const [loading, setLoading] = useState(true);
@@ -93,9 +93,7 @@ export const CompaniesManager: React.FC<CompaniesManagerProps> = ({ onBack }) =>
     formData.append('file', logoFile);
 
     try {
-      await api.post(`/companies/${uploadingLogoComp.id}/logo`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      await api.post(`/companies/${uploadingLogoComp.id}/logo`, formData);
       setUploadingLogoComp(null);
       setLogoFile(null);
       toast.success('Đã tải logo lên thành công!');
@@ -128,12 +126,12 @@ export const CompaniesManager: React.FC<CompaniesManagerProps> = ({ onBack }) =>
   };
 
   return (
-    <div style={{ padding: '24px', maxWidth: '1200px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+    <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
       {/* Top Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div>
           <div style={{ fontSize: '20px', fontWeight: 800, color: 'var(--neutral-900)' }}>
-            Quản lý Hội sở / Đơn vị
+            Quản lý Hội sở / Đơn vị — {selectedCompany ? selectedCompany.name : 'Tất cả hội sở'}
           </div>
           <div style={{ fontSize: '13px', color: 'var(--neutral-500)', marginTop: '2px' }}>
             Danh sách các đơn vị thành viên, hội sở trong hệ thống Superbrain

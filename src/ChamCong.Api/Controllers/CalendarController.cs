@@ -38,6 +38,7 @@ public class CalendarController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetDays(int companyId, [FromQuery] DateTime from, [FromQuery] DateTime to, CancellationToken ct)
     {
+        _access.EnsureStaffOrAbove();
         await _access.EnsureCompanyAsync(companyId, ct);
 
         var list = await _db.CalendarDays
@@ -73,6 +74,7 @@ public class CalendarController : ControllerBase
     [HttpPost("save-day")]
     public async Task<IActionResult> SaveDay(int companyId, [FromBody] SaveDayDto dto, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var date = dto.Date.Date;
 
@@ -139,6 +141,7 @@ public class CalendarController : ControllerBase
     [HttpPost("batch-generate")]
     public async Task<IActionResult> BatchGenerate(int companyId, [FromBody] BatchGenerateDto dto, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         int year = dto.Year;
         if (year < 2020 || year > 2040) return BadRequest(new { message = "Năm không hợp lệ." });

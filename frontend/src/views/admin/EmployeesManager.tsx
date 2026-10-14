@@ -51,6 +51,8 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
   const [exemptPunch, setExemptPunch] = useState(false);
   const [defaultNote, setDefaultNote] = useState('');
   const [sortOrder, setSortOrder] = useState(0);
+  const [createUserAccount, setCreateUserAccount] = useState(true);
+  const [accountPassword, setAccountPassword] = useState('123456');
   const [savingEmp, setSavingEmp] = useState(false);
   const [empError, setEmpError] = useState<string | null>(null);
 
@@ -151,6 +153,9 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
     setSavingEmp(true);
     setEmpError(null);
 
+    const compPrefix = (selectedCompany.code || `c${selectedCompany.id}`).trim().toLowerCase();
+    const autoUsername = `${compPrefix}_${empCode.trim().toLowerCase()}`;
+
     const payload = {
       employeeCode: empCode.trim(),
       fullName: fullName.trim(),
@@ -161,6 +166,9 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
       exemptPunch: exemptPunch,
       defaultNote: defaultNote.trim() || null,
       sortOrder: sortOrder,
+      createUserAccount: !editingEmpId ? createUserAccount : false,
+      username: autoUsername,
+      password: accountPassword
     };
 
     try {
@@ -171,10 +179,34 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
       }
       setShowEmpModal(false);
       fetchData();
+      toast.success(editingEmpId ? 'Đã cập nhật thông tin nhân viên.' : 'Đã thêm nhân viên và cấp tài khoản thành công!');
     } catch (err: any) {
       setEmpError(err.response?.data?.message || 'Có lỗi xảy ra khi lưu nhân viên');
     } finally {
       setSavingEmp(false);
+    }
+  };
+
+  const handleQuickCreateAccount = async (emp: Employee) => {
+    if (!selectedCompany) return;
+    const confirmed = await toast.confirm({
+      title: emp.hasAccount ? 'Đặt lại mật khẩu tài khoản' : 'Cấp tài khoản đăng nhập ESS',
+      message: emp.hasAccount
+        ? `Đặt lại mật khẩu cho tài khoản @${emp.username} (${emp.fullName}) về mặc định "123456"?`
+        : `Cấp mới tài khoản đăng nhập tự phục vụ cho nhân viên ${emp.fullName} (Mã: ${emp.employeeCode}) với mật khẩu mặc định "123456"?`,
+      confirmText: emp.hasAccount ? 'Đặt lại (123456)' : 'Cấp tài khoản',
+      type: 'primary'
+    });
+    if (!confirmed) return;
+
+    try {
+      const res = await api.post(`/companies/${selectedCompany.id}/employees/${emp.id}/create-account`, {
+        password: '123456'
+      });
+      toast.success(res.data.message || 'Thao tác tài khoản thành công!');
+      fetchData();
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || 'Lỗi khi cấp tài khoản.');
     }
   };
 
@@ -273,9 +305,7 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
     formData.append('file', importFile);
 
     try {
-      const res = await api.post(`/companies/${selectedCompany.id}/employees/import-excel`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
+      const res = await api.post(`/companies/${selectedCompany.id}/employees/import-excel`, formData);
       setImportResult(res.data);
       toast.success(res.data.message || 'Import danh sách nhân sự thành công!');
       fetchData();
@@ -346,6 +376,14 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
     (e.departmentName && e.departmentName.toLowerCase().includes(search.toLowerCase()))
   );
 
+  if (!selectedCompany) {
+    return (
+      <div style={{ padding: '40px', textAlign: 'center', color: 'var(--neutral-500)' }}>
+        Vui lòng chọn một Hội sở làm việc trên thanh Navbar để quản lý danh mục nhân sự và sơ đồ bộ phận.
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
       {/* Top Header */}
@@ -378,7 +416,7 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
             </div>
             <div>
               <h1 style={{ fontSize: '1.25rem', fontWeight: 800, margin: 0, color: '#0f172a' }}>
-                Danh mục Nhân sự — {selectedCompany?.name}
+                Danh mục Nhân sự — {selectedCompany ? selectedCompany.name : 'Tất cả hội sở'}
               </h1>
               <p style={{ margin: '4px 0 0 0', fontSize: '0.875rem', color: '#64748b' }}>
                 Hồ sơ nhân viên, ngày nghỉ phép, sơ đồ bộ phận và khối nhân viên
@@ -480,6 +518,7 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
                       <th>Bộ phận</th>
                       <th>Khối nhân viên</th>
                       <th style={{ textAlign: 'center', width: '130px' }}>Phép năm còn</th>
+                      <th style={{ textAlign: 'center', width: '150px' }}>Tài khoản ESS</th>
                       <th style={{ textAlign: 'center' }}>Ngày bắt đầu</th>
                       <th style={{ textAlign: 'center' }}>Nghỉ việc</th>
                       <th style={{ textAlign: 'center' }}>Miễn quẹt</th>
@@ -493,7 +532,7 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
                       return (
                         <tr key={e.id}>
                           <td style={{ textAlign: 'center' }}>{e.sortOrder || idx + 1}</td>
-                          <td style={{ fontWeight: 800, color: '#1e40af', fontFamily: 'monospace' }}>{e.employeeCode}</td>
+                          <td style={{ fontWeight: 800, color: '#0056B3', fontFamily: 'monospace' }}>{e.employeeCode}</td>
                           <td style={{ fontWeight: 600 }}>{e.fullName}</td>
                           <td>{e.departmentName || '-'}</td>
                           <td>
@@ -518,6 +557,42 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
                               <Wallet size={12} />
                               <span>{remaining.toFixed(1)} ngày</span>
                             </button>
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            {e.hasAccount ? (
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
+                                <span className="badge badge-success" style={{ fontSize: '11px', fontWeight: 700 }}>
+                                  @{e.username}
+                                </span>
+                                <button
+                                  type="button"
+                                  className="btn btn-secondary btn-sm"
+                                  style={{ padding: '2px 6px', fontSize: '10px' }}
+                                  title="Đặt lại mật khẩu về 123456"
+                                  onClick={() => handleQuickCreateAccount(e)}
+                                >
+                                  Reset
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                style={{
+                                  padding: '3px 8px',
+                                  fontSize: '11px',
+                                  fontWeight: 700,
+                                  backgroundColor: '#0056B3',
+                                  color: '#fff',
+                                  border: 'none',
+                                  borderRadius: '6px'
+                                }}
+                                title="Cấp tài khoản đăng nhập cho nhân viên này"
+                                onClick={() => handleQuickCreateAccount(e)}
+                              >
+                                + Cấp TK
+                              </button>
+                            )}
                           </td>
                           <td style={{ textAlign: 'center', fontSize: '12px' }}>
                             {new Date(e.startDate).toLocaleDateString('vi-VN')}
@@ -776,6 +851,61 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
                     placeholder="Ví dụ: Giáo viên Toán trí tuệ, làm thêm T7..."
                   />
                 </div>
+
+                {/* Tùy chọn cấp tài khoản đăng nhập khi tạo mới */}
+                {!editingEmpId && (
+                  <div style={{
+                    marginTop: '16px',
+                    padding: '14px',
+                    backgroundColor: '#EFF6FF',
+                    border: '1px solid #BFDBFE',
+                    borderRadius: '8px'
+                  }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', fontWeight: 700, color: '#0056B3', fontSize: '13px' }}>
+                      <input
+                        type="checkbox"
+                        checked={createUserAccount}
+                        onChange={(e) => setCreateUserAccount(e.target.checked)}
+                      />
+                      <span>Cấp tài khoản đăng nhập tự phục vụ (Mobile ESS)</span>
+                    </label>
+                    {createUserAccount && (
+                      <div style={{ marginTop: '10px' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                          <div>
+                            <label className="form-label" style={{ fontSize: '11px', color: '#475569' }}>
+                              Tên đăng nhập (Mã hội sở + Mã NV)
+                            </label>
+                            <input
+                              type="text"
+                              className="form-control form-control-sm"
+                              value={
+                                empCode.trim()
+                                  ? `${(selectedCompany?.code || `c${selectedCompany?.id || ''}`).toLowerCase()}_${empCode.trim().toLowerCase()}`
+                                  : `${(selectedCompany?.code || 'hộisở').toLowerCase()}_[mã_nv]`
+                              }
+                              disabled
+                              style={{ backgroundColor: '#F1F5F9', fontWeight: 700, color: '#0056B3' }}
+                            />
+                          </div>
+                          <div>
+                            <label className="form-label" style={{ fontSize: '11px', color: '#475569' }}>Mật khẩu ban đầu</label>
+                            <input
+                              type="text"
+                              className="form-control form-control-sm"
+                              value={accountPassword}
+                              onChange={(e) => setAccountPassword(e.target.value)}
+                              placeholder="123456"
+                            />
+                          </div>
+                        </div>
+                        <div style={{ fontSize: '11px', color: '#2563EB', marginTop: '6px' }}>
+                          💡 Tài khoản tự động kết hợp mã hội sở (<code>{(selectedCompany?.code || '').toLowerCase()}</code>) để không bị trùng khi các hội sở dùng chung mã NV.
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="modal-footer">

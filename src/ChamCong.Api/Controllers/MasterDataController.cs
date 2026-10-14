@@ -32,6 +32,7 @@ public class MasterDataController : ControllerBase
     [HttpGet("departments")]
     public async Task<IActionResult> GetDepartments(int companyId, CancellationToken ct)
     {
+        _access.EnsureStaffOrAbove();
         await _access.EnsureCompanyAsync(companyId, ct);
         var list = await _db.Departments
             .AsNoTracking()
@@ -46,6 +47,7 @@ public class MasterDataController : ControllerBase
     [HttpPost("departments")]
     public async Task<IActionResult> CreateDepartment(int companyId, [FromBody] SaveDepartmentDto dto, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var name = Text.Required(dto.Name, "Tên bộ phận", 100);
 
@@ -72,6 +74,7 @@ public class MasterDataController : ControllerBase
     [HttpPut("departments/{id}")]
     public async Task<IActionResult> UpdateDepartment(int companyId, int id, [FromBody] SaveDepartmentDto dto, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var dept = await _db.Departments.FirstOrDefaultAsync(d => d.Id == id && d.CompanyId == companyId, ct);
         if (dept == null) return NotFound();
@@ -94,6 +97,7 @@ public class MasterDataController : ControllerBase
     [HttpDelete("departments/{id}")]
     public async Task<IActionResult> DeleteDepartment(int companyId, int id, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var dept = await _db.Departments.FirstOrDefaultAsync(d => d.Id == id && d.CompanyId == companyId, ct);
         if (dept == null) return NotFound();
@@ -119,6 +123,7 @@ public class MasterDataController : ControllerBase
     [HttpGet("groups")]
     public async Task<IActionResult> GetGroups(int companyId, CancellationToken ct)
     {
+        _access.EnsureStaffOrAbove();
         await _access.EnsureCompanyAsync(companyId, ct);
         var list = await _db.EmployeeGroups
             .AsNoTracking()
@@ -132,6 +137,7 @@ public class MasterDataController : ControllerBase
     [HttpPost("groups")]
     public async Task<IActionResult> CreateGroup(int companyId, [FromBody] SaveEmployeeGroupDto dto, CancellationToken ct)
     {
+        _access.EnsureHR();
         await _access.EnsureCompanyAsync(companyId, ct);
         var code = Text.Required(dto.Code, "Mã khối", 20).ToUpperInvariant();
         var name = Text.Required(dto.Name, "Tên khối", 100);
@@ -193,6 +199,7 @@ public class MasterDataController : ControllerBase
     [HttpGet("codes")]
     public async Task<IActionResult> GetCodes(int companyId, CancellationToken ct)
     {
+        _access.EnsureStaffOrAbove();
         await _access.EnsureCompanyAsync(companyId, ct);
         var list = await _db.AttendanceCodes
             .AsNoTracking()

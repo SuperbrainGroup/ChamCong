@@ -45,6 +45,26 @@ public static class ParamCatalog
     public const string HalfDaySuspectMinutes = "HALF_DAY_SUSPECT_MINUTES";
     public const string PeriodStartDay = "PERIOD_START_DAY";
 
+    // --- Phase 2 (ESS & Mobile PWA) Parameters ---
+    public const string CheckinPolicy = "CHECKIN_POLICY";
+    public const string GeoAccuracyMaxM = "GEO_ACCURACY_MAX_M";
+    public const string GeoAccCreditM = "GEO_ACC_CREDIT_M";
+    public const string PunchMinIntervalSec = "PUNCH_MIN_INTERVAL_SEC";
+    public const string PunchMaxPerDay = "PUNCH_MAX_PER_DAY";
+    public const string MinWorkSpanMin = "MIN_WORK_SPAN_MIN";
+    public const string RequestEvidencePolicy = "REQUEST_EVIDENCE_POLICY";
+    public const string RequestBackdateMaxDays = "REQUEST_BACKDATE_MAX_DAYS";
+    public const string LeaveAdvanceMaxDays = "LEAVE_ADVANCE_MAX_DAYS";
+    public const string PublishDefaultDay = "PUBLISH_DEFAULT_DAY";
+    public const string DisputeWindowDays = "DISPUTE_WINDOW_DAYS";
+    public const string NightlyPreviewTime = "NIGHTLY_PREVIEW_TIME";
+    public const string LoginMaxFails = "LOGIN_MAX_FAILS";
+    public const string LockMinutes = "LOCK_MINUTES";
+    public const string IpDriftAlertCount = "IP_DRIFT_ALERT_COUNT";
+    public const string FlagRepeatAlert = "FLAG_REPEAT_ALERT";
+    public const string LocationRetentionMonths = "LOCATION_RETENTION_MONTHS";
+    public const string EvidenceRetentionMonths = "EVIDENCE_RETENTION_MONTHS";
+
     public static readonly IReadOnlyList<ParamDef> All = new List<ParamDef>
     {
         new() { Code = ShiftStandardHours, Group = "Ca làm việc", Name = "Khung giờ ca chuẩn", Type = ParamType.TimeRange,
@@ -57,9 +77,9 @@ public static class ParamCatalog
             Options = new[] { new ParamOption("ON", "Kích hoạt (bù giờ đối xứng)"), new ParamOption("OFF", "Không áp dụng") },
             Description = "Vào trễ trong khung linh hoạt thì ra muộn tương ứng được tính đủ công, 0 phút trễ." },
         new() { Code = FlexInWindow, Group = "Flexitime", Name = "Khung giờ vào linh hoạt", Type = ParamType.TimeRange,
-            Default = "08:00-08:45", Description = "Phải bắt đầu từ giờ vào ca chuẩn." },
+            Default = "08:00-08:10", Description = "Phải bắt đầu từ giờ vào ca chuẩn." },
         new() { Code = FlexOutWindow, Group = "Flexitime", Name = "Khung giờ ra bù giờ", Type = ParamType.TimeRange,
-            Default = "17:00-17:45", Description = "Giờ ra bù không vượt quá cuối khung này." },
+            Default = "17:00-17:10", Description = "Giờ ra bù không vượt quá cuối khung này." },
         new() { Code = GracePeriodMinutes, Group = "Flexitime", Name = "Thời gian du di (phút)", Type = ParamType.Int,
             Default = "10", Min = 0, Max = 120, Description = "Vào trễ không quá số phút này thì không bị coi là đi trễ. 0 = không áp dụng." },
         new() { Code = MinHoursFullDay, Group = "Ngưỡng công", Name = "Ngưỡng tính đủ 1.0 công (giờ)", Type = ParamType.Decimal,
@@ -87,6 +107,47 @@ public static class ParamCatalog
             Default = "120", Min = 0, Max = 600, Description = "Ngày 0.5 công có phút trễ hoặc sớm từ ngưỡng này trở lên sẽ được cảnh báo đối chiếu đơn nghỉ." },
         new() { Code = PeriodStartDay, Group = "Kỳ công", Name = "Ngày bắt đầu kỳ công", Type = ParamType.Int, Default = "26", Min = 1, Max = 28,
             Description = "Kỳ tháng M chạy từ ngày này của tháng M-1 đến ngày trước đó của tháng M (mặc định 26 → 25). Đặt 1 để chạy theo tháng dương lịch.", CompanyOnly = true },
+
+        // --- Danh mục tham số Phase 2 ---
+        new() { Code = CheckinPolicy, Group = "Chấm công di động (PWA)", Name = "Chính sách kiểm tra hiện diện", Type = ParamType.Enum, Default = "OFFICE_STRICT",
+            Options = new[] { new ParamOption("OFFICE_STRICT", "Văn phòng nghiêm ngặt (Thiết bị + Public IP + GPS)"),
+                              new ParamOption("OFFICE_GPS_ONLY", "Chỉ kiểm tra GPS (Thiết bị + GPS)"),
+                              new ParamOption("LOCATION_NOT_REQUIRED", "Không yêu cầu vị trí (Remote/Online)") },
+            Description = "Áp dụng theo khối nhân viên hoặc hội sở." },
+        new() { Code = GeoAccuracyMaxM, Group = "Chấm công di động (PWA)", Name = "Sai số GPS tối đa cho phép (m)", Type = ParamType.Int,
+            Default = "100", Min = 10, Max = 1000, Description = "Độ chính xác GPS từ thiết bị lớn hơn số này sẽ bị gắn cờ độ chính xác kém." },
+        new() { Code = GeoAccCreditM, Group = "Chấm công di động (PWA)", Name = "Sai số GPS khấu trừ khoảng cách (m)", Type = ParamType.Int,
+            Default = "30", Min = 0, Max = 200, Description = "Khoảng cách hiệu dụng = max(0, khoảng cách - min(độ chính xác, mức khấu trừ))." },
+        new() { Code = PunchMinIntervalSec, Group = "Chấm công di động (PWA)", Name = "Khoảng cách tối thiểu giữa 2 lần bấm (giây)", Type = ParamType.Int,
+            Default = "60", Min = 10, Max = 600, Description = "Chống bấm dồn nhiều lần trong thời gian ngắn." },
+        new() { Code = PunchMaxPerDay, Group = "Chấm công di động (PWA)", Name = "Số lượt bấm tối đa mỗi ngày", Type = ParamType.Int,
+            Default = "10", Min = 2, Max = 50 },
+        new() { Code = MinWorkSpanMin, Group = "Chấm công di động (PWA)", Name = "Khoảng cách tối thiểu Vào → Ra (phút)", Type = ParamType.Int,
+            Default = "30", Min = 5, Max = 480, Description = "Lượt Ra phải cách lượt Vào ít nhất số phút này mới được ghi nhận là giờ Ra." },
+        new() { Code = RequestEvidencePolicy, Group = "Đơn từ & Giải trình", Name = "Chính sách ảnh minh chứng đơn từ", Type = ParamType.Enum, Default = "REQUIRED",
+            Options = new[] { new ParamOption("REQUIRED", "Bắt buộc có ít nhất 1 ảnh minh chứng"), new ParamOption("OPTIONAL", "Không bắt buộc ảnh") } },
+        new() { Code = RequestBackdateMaxDays, Group = "Đơn từ & Giải trình", Name = "Hạn nộp lùi về quá khứ tối đa (ngày)", Type = ParamType.Int,
+            Default = "10", Min = 1, Max = 60, Description = "Chỉ cho phép nộp đơn/giải trình lùi tối đa số ngày này." },
+        new() { Code = LeaveAdvanceMaxDays, Group = "Đơn từ & Giải trình", Name = "Hạn nộp trước tương lai tối đa (ngày)", Type = ParamType.Int,
+            Default = "90", Min = 1, Max = 365, Description = "Số ngày nộp đơn xin nghỉ trước tối đa trong tương lai." },
+        new() { Code = PublishDefaultDay, Group = "Công bố bảng công", Name = "Mốc ngày gợi ý công bố bảng công", Type = ParamType.Int,
+            Default = "28", Min = 1, Max = 31, CompanyOnly = true },
+        new() { Code = DisputeWindowDays, Group = "Công bố bảng công", Name = "Thời hạn khiếu nại bảng công (ngày)", Type = ParamType.Int,
+            Default = "3", Min = 1, Max = 30, Description = "Số ngày cho phép nhân viên gửi khiếu nại sau khi bảng công được công bố." },
+        new() { Code = NightlyPreviewTime, Group = "Tự động hóa", Name = "Giờ chạy tính nháp hằng đêm", Type = ParamType.Time,
+            Default = "22:00", Description = "Thời điểm chạy tính toán nháp và sinh danh sách ngày cần giải trình.", CompanyOnly = true },
+        new() { Code = LoginMaxFails, Group = "Bảo mật", Name = "Số lần đăng nhập sai tối đa", Type = ParamType.Int,
+            Default = "5", Min = 3, Max = 20, Description = "Vượt quá ngưỡng này tài khoản sẽ tạm khóa.", CompanyOnly = true },
+        new() { Code = LockMinutes, Group = "Bảo mật", Name = "Thời gian tạm khóa tài khoản (phút)", Type = ParamType.Int,
+            Default = "15", Min = 1, Max = 1440, CompanyOnly = true },
+        new() { Code = IpDriftAlertCount, Group = "Cảnh báo HCNS", Name = "Ngưỡng cảnh báo Public IP đổi", Type = ParamType.Int,
+            Default = "5", Min = 2, Max = 50, Description = "Số lượt GPS hợp lệ nhưng IP lạ cùng hội sở trong 30 phút sẽ kích hoạt cảnh báo đổi IP.", CompanyOnly = true },
+        new() { Code = FlagRepeatAlert, Group = "Cảnh báo HCNS", Name = "Ngưỡng cảnh báo lặp lại cờ vàng/đỏ trong kỳ", Type = ParamType.Int,
+            Default = "3", Min = 1, Max = 20, Description = "Nhân viên bị gắn cờ từ ngưỡng này trở lên sẽ xuất hiện trong cảnh báo HCNS." },
+        new() { Code = LocationRetentionMonths, Group = "Quyền riêng tư & Lưu trữ", Name = "Thời hạn lưu trữ tọa độ GPS (tháng)", Type = ParamType.Int,
+            Default = "12", Min = 1, Max = 60, CompanyOnly = true },
+        new() { Code = EvidenceRetentionMonths, Group = "Quyền riêng tư & Lưu trữ", Name = "Thời hạn lưu trữ ảnh minh chứng (tháng)", Type = ParamType.Int,
+            Default = "24", Min = 1, Max = 120, CompanyOnly = true }
     };
 
     public static ParamDef? Find(string code) => All.FirstOrDefault(p => p.Code == code);
@@ -100,6 +161,7 @@ public static class ParamCatalog
             [FlexitimeMode] = "OFF",
             [GracePeriodMinutes] = "10",
             [OtEnabled] = "false",
+            [CheckinPolicy] = "OFFICE_GPS_ONLY",
         },
         "REMOTE" => new()
         {
@@ -109,6 +171,7 @@ public static class ParamCatalog
             [FlexOutWindow] = "00:00-23:59",
             [GracePeriodMinutes] = "0",
             [OtEnabled] = "false",
+            [CheckinPolicy] = "LOCATION_NOT_REQUIRED",
         },
         _ => new()
     };

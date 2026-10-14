@@ -50,7 +50,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const init = async () => {
       const token = localStorage.getItem('token');
-      if (token) {
+      const refreshToken = localStorage.getItem('refreshToken');
+      if ((token && token !== 'undefined' && token !== 'null') || (refreshToken && refreshToken !== 'undefined' && refreshToken !== 'null')) {
         try {
           const res = await api.get('/auth/me');
           setUser(res.data);
@@ -59,6 +60,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         } catch {
           logout();
         }
+      } else {
+        localStorage.removeItem('token');
+        localStorage.removeItem('refreshToken');
+        localStorage.removeItem('user');
+        setUser(null);
       }
       setLoading(false);
     };
@@ -74,6 +80,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const logout = () => {
     localStorage.removeItem('token');
+    localStorage.removeItem('refreshToken');
     localStorage.removeItem('user');
     localStorage.removeItem('selectedCompany');
     setUser(null);
