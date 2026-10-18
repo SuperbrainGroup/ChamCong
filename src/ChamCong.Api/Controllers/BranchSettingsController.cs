@@ -283,8 +283,8 @@ public class HrDashboardController : ControllerBase
         var punchesToday = await punchesQ.ToListAsync(ct);
 
         int checkedInCount = punchesToday.Select(p => p.EmployeeCode).Distinct().Count();
-        int validCount = punchesToday.Count(p => p.VerificationStatus == "VALID");
-        int reviewCount = punchesToday.Count(p => p.VerificationStatus == "REVIEW");
+        int validCount = punchesToday.Count(p => p.VerificationStatus == "VALID" && p.ReviewState != "REJECTED");
+        int reviewCount = punchesToday.Count(p => p.VerificationStatus != "VALID" || p.ReviewState == "PENDING");
         int outCount = punchesToday.Count(p => p.VerificationStatus == "OUT_OF_OFFICE");
 
         // Đếm thiết bị chờ duyệt theo đúng cơ sở

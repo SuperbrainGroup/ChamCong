@@ -236,6 +236,7 @@ textarea.form-control {
   font-size: 12px;
   font-weight: 600;
   border-radius: 9999px;
+  white-space: nowrap !important;
 }
 
 .badge-primary { background-color: var(--primary-light); color: var(--primary-text); }
@@ -243,6 +244,11 @@ textarea.form-control {
 .badge-warning { background-color: var(--warning-light); color: var(--warning-text); }
 .badge-danger { background-color: var(--danger-light); color: var(--danger-text); }
 .badge-neutral { background-color: var(--neutral-100); color: var(--neutral-700); }
+
+/* Buttons global nowrap */
+button, .btn {
+  white-space: nowrap !important;
+}
 
 /* Tables */
 .table-container {
@@ -266,13 +272,17 @@ textarea.form-control {
   font-weight: 700;
   color: var(--neutral-700);
   border-bottom: 1px solid var(--neutral-200);
-  white-space: nowrap;
+  white-space: nowrap !important;
 }
 
 .table td {
   padding: 9px 12px;
   border-bottom: 1px solid var(--neutral-200);
   color: var(--neutral-800);
+}
+
+.table td.nowrap, .table td:has(button), .table td:has(.badge) {
+  white-space: nowrap;
 }
 
 .table tr:hover td {

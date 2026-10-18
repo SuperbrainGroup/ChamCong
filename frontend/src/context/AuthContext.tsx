@@ -57,8 +57,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setUser(res.data);
           localStorage.setItem('user', JSON.stringify(res.data));
           await fetchCompanies();
-        } catch {
-          logout();
+        } catch (err: any) {
+          if (err.response?.status === 401) {
+            logout();
+          } else {
+            const savedUser = localStorage.getItem('user');
+            if (savedUser) {
+              try {
+                setUser(JSON.parse(savedUser));
+                fetchCompanies().catch(() => {});
+              } catch {}
+            }
+          }
         }
       } else {
         localStorage.removeItem('token');

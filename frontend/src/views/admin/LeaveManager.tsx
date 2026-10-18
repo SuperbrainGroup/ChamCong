@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { LeaveRequest, LeaveFund, LeaveLedgerItem, Employee, AttendanceCode } from '../../types';
-import { api } from '../../api/client';
+import { LeaveRequest, LeaveFund, LeaveLedgerItem, Employee, AttendanceCode, UserRequestItem } from '../../types';
+import { api, requestsApi } from '../../api/client';
 import {
   FileText,
   Plus,
@@ -16,7 +16,12 @@ import {
   Search,
   Wallet,
   Calendar,
-  X
+  X,
+  Check,
+  XCircle,
+  Clock,
+  User,
+  Paperclip
 } from 'lucide-react';
 
 interface LeaveManagerProps {
@@ -28,14 +33,27 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
   const toast = useToast();
   const today = new Date();
 
-  // Active tab: 'requests' | 'funds'
-  const [activeTab, setActiveTab] = useState<'requests' | 'funds'>('requests');
+  // Active tab: 'approvals' | 'requests' | 'funds'
+  const [activeTab, setActiveTab] = useState<'approvals' | 'requests' | 'funds'>('approvals');
 
   // Common lookups
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [codes, setCodes] = useState<AttendanceCode[]>([]);
 
-  // 1. LEAVE REQUESTS STATE
+  // 0. APPROVALS STATE (Đơn xin nghỉ phép nhân viên gửi lên từ Cổng ESS / App)
+  const [approvalRequests, setApprovalRequests] = useState<UserRequestItem[]>([]);
+  const [loadingApprovals, setLoadingApprovals] = useState(false);
+  const [approvalStatusFilter, setApprovalStatusFilter] = useState<'ALL' | 'PENDING_HR' | 'APPROVED' | 'REJECTED'>('PENDING_HR');
+  const [approvalSearch, setApprovalSearch] = useState('');
+  const [pendingCount, setPendingCount] = useState<number>(0);
+
+  // Decision Modal
+  const [selectedRequestForDecision, setSelectedRequestForDecision] = useState<UserRequestItem | null>(null);
+  const [decisionAction, setDecisionAction] = useState<'APPROVE' | 'REJECT' | null>(null);
+  const [decisionNote, setDecisionNote] = useState('');
+  const [processingDecision, setProcessingDecision] = useState(false);
+
+  // 1. LEAVE REQUESTS STATE (Dữ liệu ngoại lệ ngày nghỉ đã lưu / nhập tay)
   const [reqFrom, setReqFrom] = useState<string>(
     `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-01`
   );
@@ -104,6 +122,52 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
     }
   };
 
+  // Fetch Approvals (Đơn nhân viên nộp từ Cổng ESS / App)
+  const fetchApprovals = async () => {
+    setLoadingApprovals(true);
+    try {
+      const statusParam = approvalStatusFilter === 'ALL' ? undefined : approvalStatusFilter;
+      const data = await requestsApi.getHrRequests(statusParam, selectedCompany?.code);
+      const leaveOnly = data.filter(r => r.requestType === 'LEAVE');
+      setApprovalRequests(leaveOnly);
+
+      // Cập nhật số lượng đơn PENDING_HR
+      const allPendingData = await requestsApi.getHrRequests('PENDING_HR', selectedCompany?.code);
+      const pendingLeaves = allPendingData.filter(r => r.requestType === 'LEAVE').length;
+      setPendingCount(pendingLeaves);
+    } catch (err: any) {
+      console.error('Lỗi tải danh sách duyệt đơn:', err);
+      toast.error('Không thể tải danh sách đơn nghỉ phép của nhân viên.');
+    } finally {
+      setLoadingApprovals(false);
+    }
+  };
+
+  const handleOpenDecisionModal = (req: UserRequestItem, action: 'APPROVE' | 'REJECT') => {
+    setSelectedRequestForDecision(req);
+    setDecisionAction(action);
+    setDecisionNote(action === 'APPROVE' ? 'Đã duyệt nghỉ phép' : 'Từ chối đơn');
+  };
+
+  const handleConfirmDecision = async () => {
+    if (!selectedRequestForDecision || !decisionAction) return;
+    setProcessingDecision(true);
+    try {
+      await requestsApi.decideRequest(selectedRequestForDecision.requestId, decisionAction, decisionNote);
+      toast.success(decisionAction === 'APPROVE' ? 'Đã phê duyệt đơn nghỉ phép thành công!' : 'Đã từ chối đơn nghỉ phép.');
+      setSelectedRequestForDecision(null);
+      setDecisionAction(null);
+      setDecisionNote('');
+      fetchApprovals();
+      fetchRequests();
+      fetchFunds();
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || 'Có lỗi xảy ra khi xử lý đơn.');
+    } finally {
+      setProcessingDecision(false);
+    }
+  };
+
   // Fetch Funds
   const fetchFunds = async () => {
     if (!selectedCompany) return;
@@ -122,12 +186,14 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
   };
 
   useEffect(() => {
-    if (activeTab === 'requests') {
+    if (activeTab === 'approvals') {
+      fetchApprovals();
+    } else if (activeTab === 'requests') {
       fetchRequests();
     } else {
       fetchFunds();
     }
-  }, [selectedCompany?.id, activeTab, reqFrom, reqTo, fundYear]);
+  }, [selectedCompany?.id, activeTab, reqFrom, reqTo, fundYear, approvalStatusFilter]);
 
   // Handle Save Request
   const handleSaveRequest = async (e: React.FormEvent) => {
@@ -301,27 +367,51 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
           <div
             style={{
               display: 'flex',
-              gap: '4px',
+              gap: '6px',
               backgroundColor: '#f1f5f9',
               padding: '4px',
               borderRadius: '8px'
             }}
           >
             <button
+              type="button"
+              onClick={() => setActiveTab('approvals')}
+              className={`btn btn-sm ${activeTab === 'approvals' ? 'btn-primary' : 'btn-secondary'}`}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+            >
+              <CheckCircle2 size={15} />
+              <span>Duyệt Đơn Nghỉ Phép</span>
+              {pendingCount > 0 && (
+                <span style={{
+                  backgroundColor: activeTab === 'approvals' ? '#FEF08A' : '#EF4444',
+                  color: activeTab === 'approvals' ? '#854D0E' : '#FFFFFF',
+                  padding: '1px 6px',
+                  borderRadius: '10px',
+                  fontSize: '11px',
+                  fontWeight: 800
+                }}>
+                  {pendingCount}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
               onClick={() => setActiveTab('requests')}
               className={`btn btn-sm ${activeTab === 'requests' ? 'btn-primary' : 'btn-secondary'}`}
               style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+              title="Danh sách toàn bộ ngày nghỉ phép đã lưu vào hệ thống từ nhập tay trực tiếp hoặc import file Excel"
             >
               <Calendar size={15} />
-              <span>Đơn Nghỉ Phép</span>
+              <span>Danh Sách Nghỉ Đã Ghi Nhận</span>
             </button>
             <button
+              type="button"
               onClick={() => setActiveTab('funds')}
               className={`btn btn-sm ${activeTab === 'funds' ? 'btn-primary' : 'btn-secondary'}`}
               style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
             >
               <Wallet size={15} />
-              <span>Sổ dư Phép</span>
+              <span>Sổ Dư & Quỹ Phép</span>
             </button>
           </div>
         </div>
@@ -351,9 +441,296 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
         </div>
       )}
 
-      {/* TAB 1: LEAVE REQUESTS */}
+      {/* ============================================================== */}
+      {/* TAB 0: DUYỆT ĐƠN NGHỈ PHÉP NHÂN VIÊN GỬI LÊN                    */}
+      {/* ============================================================== */}
+      {activeTab === 'approvals' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          {/* Controls Bar */}
+          <div className="card">
+            <div
+              className="card-body"
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '12px',
+                padding: '1rem 1.25rem'
+              }}
+            >
+              {/* Lọc trạng thái đơn */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '13px', fontWeight: 700, color: '#475569', marginRight: '4px' }}>
+                  Trạng thái:
+                </span>
+                {(['PENDING_HR', 'ALL', 'APPROVED', 'REJECTED'] as const).map((st) => {
+                  const isCurrent = approvalStatusFilter === st;
+                  const label = st === 'PENDING_HR' ? 'Chờ HCNS duyệt' : st === 'ALL' ? 'Tất cả' : st === 'APPROVED' ? 'Đã duyệt' : 'Đã từ chối';
+                  return (
+                    <button
+                      key={st}
+                      type="button"
+                      onClick={() => setApprovalStatusFilter(st)}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: '6px',
+                        border: isCurrent ? '1px solid #0056B3' : '1px solid #CBD5E1',
+                        backgroundColor: isCurrent ? '#EFF6FF' : '#FFFFFF',
+                        color: isCurrent ? '#0056B3' : '#475569',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {label}
+                      {st === 'PENDING_HR' && pendingCount > 0 && (
+                        <span style={{
+                          marginLeft: '6px',
+                          backgroundColor: '#EF4444',
+                          color: '#FFFFFF',
+                          padding: '1px 5px',
+                          borderRadius: '8px',
+                          fontSize: '10px'
+                        }}>
+                          {pendingCount}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Tìm kiếm & nút làm mới */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{ position: 'relative', minWidth: '240px' }}>
+                  <Search
+                    size={15}
+                    color="#94a3b8"
+                    style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)' }}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Tìm theo Mã NV, họ tên, lý do..."
+                    value={approvalSearch}
+                    onChange={e => setApprovalSearch(e.target.value)}
+                    className="form-control form-control-sm"
+                    style={{ paddingLeft: '32px', paddingRight: '12px' }}
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={fetchApprovals}
+                  disabled={loadingApprovals}
+                  className="btn btn-secondary btn-sm"
+                  title="Tải lại danh sách đơn"
+                  style={{ width: '32px', height: '32px', padding: 0 }}
+                >
+                  <RefreshCw size={14} className={loadingApprovals ? 'animate-spin' : ''} />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Bảng danh sách đơn nghỉ phép */}
+          <div className="table-container">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th style={{ minWidth: '95px', whiteSpace: 'nowrap' }}>Mã NV</th>
+                  <th style={{ minWidth: '180px', whiteSpace: 'nowrap' }}>Nhân viên</th>
+                  <th style={{ minWidth: '95px', whiteSpace: 'nowrap' }}>Loại phép</th>
+                  <th style={{ minWidth: '170px', whiteSpace: 'nowrap' }}>Thời gian nghỉ</th>
+                  <th style={{ minWidth: '90px', textAlign: 'center', whiteSpace: 'nowrap' }}>Số ngày</th>
+                  <th style={{ minWidth: '220px', whiteSpace: 'nowrap' }}>Lý do xin nghỉ</th>
+                  <th style={{ minWidth: '100px', textAlign: 'center', whiteSpace: 'nowrap' }}>Minh chứng</th>
+                  <th style={{ minWidth: '130px', whiteSpace: 'nowrap' }}>Trạng thái</th>
+                  <th style={{ minWidth: '170px', whiteSpace: 'nowrap' }}>Ghi chú / Ngày gửi</th>
+                  <th style={{ minWidth: '175px', textAlign: 'center', whiteSpace: 'nowrap' }}>Thao tác</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loadingApprovals ? (
+                  <tr>
+                    <td colSpan={10} style={{ textAlign: 'center', padding: '3rem 1rem', color: '#64748b' }}>
+                      <RefreshCw size={20} className="animate-spin" style={{ margin: '0 auto 8px auto', display: 'block' }} />
+                      Đang tải danh sách đơn nghỉ phép...
+                    </td>
+                  </tr>
+                ) : approvalRequests.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} style={{ textAlign: 'center', padding: '3rem 1rem', color: '#94a3b8' }}>
+                      Không có đơn xin nghỉ phép nào phù hợp với bộ lọc.
+                    </td>
+                  </tr>
+                ) : (
+                  approvalRequests
+                    .filter(r => {
+                      if (!approvalSearch.trim()) return true;
+                      const term = approvalSearch.toLowerCase();
+                      return (
+                        (r.employeeCode && r.employeeCode.toLowerCase().includes(term)) ||
+                        (r.fullName && r.fullName.toLowerCase().includes(term)) ||
+                        (r.reason && r.reason.toLowerCase().includes(term))
+                      );
+                    })
+                    .map(req => {
+                      const isPending = req.status === 'PENDING_HR';
+                      const isApproved = req.status === 'APPROVED';
+                      const isRejected = req.status === 'REJECTED';
+
+                      const dayPartText = req.dayPart === 'MORNING'
+                        ? ' (Buổi sáng)'
+                        : req.dayPart === 'AFTERNOON'
+                          ? ' (Buổi chiều)'
+                          : '';
+
+                      return (
+                        <tr key={req.requestId} style={{ backgroundColor: isPending ? '#FEFCE8' : undefined }}>
+                          <td style={{ fontWeight: 700, color: '#0056B3', whiteSpace: 'nowrap' }}>
+                            {req.employeeCode}
+                          </td>
+                          <td style={{ whiteSpace: 'nowrap' }}>
+                            <div style={{ fontWeight: 700, color: '#0F172A' }}>{req.fullName || req.employeeCode}</div>
+                            {req.departmentName && (
+                              <div style={{ fontSize: '11px', color: '#64748B' }}>{req.departmentName}</div>
+                            )}
+                          </td>
+                          <td style={{ whiteSpace: 'nowrap' }}>
+                            <span className="badge badge-primary" style={{ fontWeight: 700, whiteSpace: 'nowrap' }}>
+                              {req.leaveCode || 'P'}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: '12px', color: '#334155', whiteSpace: 'nowrap' }}>
+                            <div>
+                              <strong>{req.fromDate}</strong>
+                              {req.fromDate !== req.toDate && <span> → <strong>{req.toDate}</strong></span>}
+                            </div>
+                            {dayPartText && <div style={{ color: '#D97706', fontSize: '11px', fontWeight: 600 }}>{dayPartText}</div>}
+                          </td>
+                          <td style={{ textAlign: 'center', fontWeight: 700, color: '#0F172A', whiteSpace: 'nowrap' }}>
+                            {req.daysRequested} d
+                          </td>
+                          <td style={{ fontSize: '13px', color: '#334155', maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {req.reason || '—'}
+                          </td>
+                          <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
+                            {req.attachmentCount > 0 ? (
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                backgroundColor: '#EFF6FF',
+                                color: '#1D4ED8',
+                                fontSize: '11px',
+                                fontWeight: 600,
+                                whiteSpace: 'nowrap'
+                              }}>
+                                <Paperclip size={11} /> {req.attachmentCount}
+                              </span>
+                            ) : (
+                              <span style={{ color: '#94A3B8', fontSize: '12px' }}>—</span>
+                            )}
+                          </td>
+                          <td style={{ whiteSpace: 'nowrap' }}>
+                            <span style={{
+                              padding: '3px 8px',
+                              borderRadius: '6px',
+                              fontSize: '11px',
+                              fontWeight: 700,
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              backgroundColor: isApproved ? '#DCFCE7' : isRejected ? '#FEE2E2' : isPending ? '#FEF3C7' : '#F1F5F9',
+                              color: isApproved ? '#166534' : isRejected ? '#991B1B' : isPending ? '#92400E' : '#475569',
+                              whiteSpace: 'nowrap'
+                            }}>
+                              {isApproved ? <Check size={12} /> : isRejected ? <X size={12} /> : <Clock size={12} />}
+                              {isApproved ? 'Đã duyệt' : isRejected ? 'Từ chối' : isPending ? 'Chờ duyệt' : 'Đã hủy'}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: '11px', color: '#64748B', whiteSpace: 'nowrap' }}>
+                            {req.hrNote && (
+                              <div style={{ color: '#0F172A', fontWeight: 600, marginBottom: '2px' }}>
+                                HCNS: {req.hrNote}
+                              </div>
+                            )}
+                            <div>{new Date(req.createdAt).toLocaleDateString('vi-VN')} {new Date(req.createdAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}</div>
+                          </td>
+                          <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
+                            {isPending ? (
+                              <div style={{ display: 'inline-flex', gap: '6px', whiteSpace: 'nowrap' }}>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenDecisionModal(req, 'APPROVE')}
+                                  style={{
+                                    backgroundColor: '#16A34A',
+                                    color: '#FFFFFF',
+                                    border: 'none',
+                                    borderRadius: '6px',
+                                    padding: '5px 12px',
+                                    fontSize: '12px',
+                                    fontWeight: 700,
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                    boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
+                                    whiteSpace: 'nowrap'
+                                  }}
+                                  title="Phê duyệt đơn này"
+                                >
+                                  <Check size={13} />
+                                  <span>Duyệt</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenDecisionModal(req, 'REJECT')}
+                                  style={{
+                                    backgroundColor: '#DC2626',
+                                    color: '#FFFFFF',
+                                    border: 'none',
+                                    borderRadius: '6px',
+                                    padding: '5px 10px',
+                                    fontSize: '12px',
+                                    fontWeight: 700,
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                    whiteSpace: 'nowrap'
+                                  }}
+                                  title="Từ chối đơn này"
+                                >
+                                  <X size={13} />
+                                  <span>Từ chối</span>
+                                </button>
+                              </div>
+                            ) : (
+                              <span style={{ fontSize: '12px', color: '#94A3B8', whiteSpace: 'nowrap' }}>Đã hoàn tất</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 1: LEAVE REQUESTS - DANH SÁCH NGHỈ ĐÃ GHI NHẬN */}
       {activeTab === 'requests' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+          {/* Hướng dẫn giải thích danh mục */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: '#F8FAFC', borderRadius: '8px', border: '1px solid #E2E8F0', fontSize: '13px', color: '#475569' }}>
+            <span><strong>Dữ liệu ngày nghỉ:</strong> Tổng hợp toàn bộ các ngày nghỉ phép của nhân viên đã ghi nhận vào hệ thống (từ nhập tay trực tiếp, nạp file Excel hoặc đã duyệt từ đơn ESS) để phục vụ tính công kỳ này.</span>
+          </div>
+
           {/* Controls Bar */}
           <div className="card">
             <div
@@ -1050,6 +1427,120 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                 className="btn btn-secondary"
               >
                 Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: XÁC NHẬN PHÊ DUYỆT HOẶC TỪ CHỐI ĐƠN */}
+      {selectedRequestForDecision && decisionAction && (
+        <div className="modal-backdrop">
+          <div className="modal" style={{ maxWidth: '480px' }}>
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {decisionAction === 'APPROVE' ? (
+                  <CheckCircle2 size={20} color="#16A34A" />
+                ) : (
+                  <XCircle size={20} color="#DC2626" />
+                )}
+                <h3 className="modal-title" style={{ color: decisionAction === 'APPROVE' ? '#166534' : '#991B1B' }}>
+                  {decisionAction === 'APPROVE' ? 'Xác Nhận Phê Duyệt Đơn' : 'Từ Chối Đơn Nghỉ Phép'}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedRequestForDecision(null);
+                  setDecisionAction(null);
+                }}
+                className="btn-close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div style={{
+                backgroundColor: '#F8FAFC',
+                border: '1px solid #E2E8F0',
+                borderRadius: '8px',
+                padding: '12px 14px',
+                fontSize: '13px'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                  <span style={{ color: '#64748B' }}>Nhân viên:</span>
+                  <strong style={{ color: '#0F172A' }}>
+                    {selectedRequestForDecision.fullName || selectedRequestForDecision.employeeCode} ({selectedRequestForDecision.employeeCode})
+                  </strong>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                  <span style={{ color: '#64748B' }}>Thời gian nghỉ:</span>
+                  <span style={{ fontWeight: 600, color: '#0056B3' }}>
+                    {selectedRequestForDecision.fromDate} → {selectedRequestForDecision.toDate} ({selectedRequestForDecision.daysRequested} ngày)
+                  </span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ color: '#64748B' }}>Lý do:</span>
+                  <span style={{ color: '#334155', fontStyle: 'italic' }}>
+                    "{selectedRequestForDecision.reason || 'Không ghi chú'}"
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="form-label" style={{ fontSize: '13px', fontWeight: 600, color: '#334155' }}>
+                  Ghi chú phản hồi của HCNS:
+                </label>
+                <textarea
+                  className="form-control"
+                  rows={3}
+                  value={decisionNote}
+                  onChange={e => setDecisionNote(e.target.value)}
+                  placeholder={decisionAction === 'APPROVE' ? 'Nhập ghi chú duyệt (tùy chọn)...' : 'Nhập lý do từ chối đơn...'}
+                />
+              </div>
+            </div>
+
+            <div className="modal-footer">
+              <button
+                type="button"
+                onClick={() => {
+                  setSelectedRequestForDecision(null);
+                  setDecisionAction(null);
+                }}
+                disabled={processingDecision}
+                className="btn btn-secondary"
+              >
+                Hủy
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDecision}
+                disabled={processingDecision}
+                className={`btn ${decisionAction === 'APPROVE' ? 'btn-primary' : 'btn-danger'}`}
+                style={{
+                  backgroundColor: decisionAction === 'APPROVE' ? '#16A34A' : '#DC2626',
+                  borderColor: decisionAction === 'APPROVE' ? '#16A34A' : '#DC2626',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
+                {processingDecision ? (
+                  <RefreshCw size={14} className="animate-spin" />
+                ) : decisionAction === 'APPROVE' ? (
+                  <Check size={14} />
+                ) : (
+                  <X size={14} />
+                )}
+                <span>
+                  {processingDecision
+                    ? 'Đang xử lý...'
+                    : decisionAction === 'APPROVE'
+                      ? 'Xác nhận Phê Duyệt'
+                      : 'Xác nhận Từ Chối'}
+                </span>
               </button>
             </div>
           </div>

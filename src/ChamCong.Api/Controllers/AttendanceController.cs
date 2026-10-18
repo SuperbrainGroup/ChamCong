@@ -1,6 +1,7 @@
 using ChamCong.Api.Data;
 using ChamCong.Api.Infrastructure;
 using ChamCong.Api.Services;
+using ChamCong.Engine;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -35,18 +36,36 @@ public class AttendanceController : ControllerBase
     public async Task<IActionResult> GetAttendanceState(CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode))
         {
             return BadRequest(new { code = "NO_EMPLOYEE", message = "Tài khoản chưa liên kết nhân viên." });
         }
 
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+
+        // 1. Phân giải ca làm việc theo Hội sở và Khối nhân viên
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
+        if (primaryCompanyId.HasValue)
+        {
+            empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
+        }
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
+        int? companyId = emp?.CompanyId ?? primaryCompanyId;
+        int? groupId = emp?.GroupId;
+
         var nowLocal = AttendancePunchService.ToVietnamTime(DateTime.UtcNow);
         var today = nowLocal.Date;
 
-        var punches = await _db.WebAttendanceLogs
+        var punchQuery = _db.WebAttendanceLogs
             .AsNoTracking()
-            .Where(l => l.EmployeeCode == user.EmployeeCode && l.WorkDate == today)
+            .Where(l => l.EmployeeCode == user.EmployeeCode && l.WorkDate == today);
+        if (companyId.HasValue)
+        {
+            punchQuery = punchQuery.Where(l => l.CompanyId == companyId.Value || l.CompanyId == null);
+        }
+
+        var punches = await punchQuery
             .OrderBy(l => l.CheckTimeUtc)
             .ToListAsync(ct);
 
@@ -64,26 +83,112 @@ public class AttendanceController : ControllerBase
         bool canCheckout = hasValidCheckin && minutesSinceFirstPunch >= minWorkSpanMin;
         int remainingMinutesToCheckout = (int)Math.Max(0, Math.Ceiling(minWorkSpanMin - minutesSinceFirstPunch));
 
-        string currentMode;
-        if (!hasValidCheckin)
+        var paramList = await _db.ParameterValues.AsNoTracking()
+            .Where(p => (p.CompanyId == null || p.CompanyId == companyId) && (p.GroupId == null || p.GroupId == groupId))
+            .ToListAsync(ct);
+
+        string ResolveParam(string code, string fallback)
         {
-            currentMode = "CHECK_IN";
+            var grp = paramList.FirstOrDefault(p => p.GroupId == groupId && p.Code == code);
+            if (grp != null && !string.IsNullOrWhiteSpace(grp.Value)) return grp.Value.Trim();
+            var cmp = paramList.FirstOrDefault(p => p.CompanyId == companyId && p.GroupId == null && p.Code == code);
+            if (cmp != null && !string.IsNullOrWhiteSpace(cmp.Value)) return cmp.Value.Trim();
+            var sys = paramList.FirstOrDefault(p => p.CompanyId == null && p.GroupId == null && p.Code == code);
+            if (sys != null && !string.IsNullOrWhiteSpace(sys.Value)) return sys.Value.Trim();
+            return fallback;
         }
-        else if (lastPunch != null)
+
+        var shiftHoursStr = ResolveParam(ParamCatalog.ShiftStandardHours, "08:00-17:00");
+        var lunchStartStr = ResolveParam(ParamCatalog.LunchBreakStart, "12:00");
+        var lunchMinutesStr = ResolveParam(ParamCatalog.LunchBreakMinutes, "60");
+        int.TryParse(lunchMinutesStr, out int lunchMinutes);
+        if (lunchMinutes <= 0) lunchMinutes = 60;
+
+        TimeUtil.TryParseRange(shiftHoursStr, out var shiftStartMin, out var shiftEndMin);
+        if (shiftStartMin <= 0 && shiftEndMin <= 0)
+        {
+            shiftStartMin = 480;  // 08:00
+            shiftEndMin = 1020;   // 17:00
+        }
+
+        var currentMinutes = (int)nowLocal.TimeOfDay.TotalMinutes;
+        const int checkoutPrepareMinutes = 30; // 30 phút trước giờ tan ca là bắt đầu khung giờ chuẩn bị ra về
+        var checkoutStartMin = Math.Max(shiftStartMin, shiftEndMin - checkoutPrepareMinutes);
+
+        var shiftStartFormatted = TimeUtil.FormatHm(shiftStartMin);
+        var shiftEndFormatted = TimeUtil.FormatHm(shiftEndMin);
+        var checkoutStartFormatted = TimeUtil.FormatHm(checkoutStartMin);
+
+        bool isCheckinWindow = currentMinutes <= (shiftStartMin + 60);
+        bool isCheckoutWindow = currentMinutes >= checkoutStartMin;
+        bool isWorkingWindow = currentMinutes > (shiftStartMin + 60) && currentMinutes < checkoutStartMin;
+        bool isPastShiftEnd = currentMinutes >= shiftEndMin;
+
+        // 2. Tự động nhận diện trạng thái ca làm việc và thao tác chấm công tương ứng
+        string currentMode;
+        string shiftStatusLabel;
+        string statusDescription;
+        bool needExplanation = false;
+
+        if (lastPunch != null)
         {
             currentMode = "COMPLETED";
+            shiftStatusLabel = "Đã hoàn thành ca làm việc";
+            statusDescription = $"Hôm nay bạn đã hoàn thành đủ 1 lượt Vào ({AttendancePunchService.ToVietnamTime(firstPunch!.CheckTimeUtc):HH:mm}) và 1 lượt Ra ({AttendancePunchService.ToVietnamTime(lastPunch.CheckTimeUtc):HH:mm}).";
         }
-        else if (!canCheckout)
+        else if (hasValidCheckin)
         {
-            currentMode = "CHECKED_IN";
+            if (!canCheckout)
+            {
+                currentMode = "CHECKED_IN";
+                shiftStatusLabel = "Đang trong ca làm việc";
+                statusDescription = $"Vừa Check-in lúc {AttendancePunchService.ToVietnamTime(firstPunch!.CheckTimeUtc):HH:mm}. Khóa Check-out tối thiểu 30 phút để chống bấm nhầm (còn {remainingMinutesToCheckout} phút).";
+            }
+            else if (isCheckoutWindow)
+            {
+                currentMode = "CHECK_OUT";
+                shiftStatusLabel = "Chuẩn bị tan ca & Sẵn sàng Check-out";
+                statusDescription = $"Đã đến khung giờ chuẩn bị ra về ({checkoutStartFormatted} – {shiftEndFormatted}). Hãy bấm Check-out khi kết thúc công việc.";
+            }
+            else
+            {
+                currentMode = "WORKING";
+                shiftStatusLabel = "Đang trong giờ làm việc";
+                statusDescription = $"Đang làm việc (Check-in lúc {AttendancePunchService.ToVietnamTime(firstPunch!.CheckTimeUtc):HH:mm}). Giờ tan ca dự kiến: {shiftEndFormatted}.";
+            }
         }
         else
         {
-            currentMode = "CHECK_OUT";
+            // CHƯA CHECK-IN
+            if (isCheckoutWindow)
+            {
+                // ĐÃ ĐẾN GIỜ CHUẨN BỊ RA VỀ NHƯNG CHƯA CHECK-IN VÀO CA!
+                currentMode = "NEED_EXPLANATION";
+                shiftStatusLabel = "Chưa Check-in — Cần giải trình";
+                statusDescription = $"Hiện tại ({nowLocal:HH:mm}) đang là giờ chuẩn bị tan ca ({checkoutStartFormatted} – {shiftEndFormatted}) nhưng bạn chưa điểm danh vào ca. Vui lòng gửi Đơn giải trình bổ sung công để được ghi nhận.";
+                needExplanation = true;
+            }
+            else if (isWorkingWindow)
+            {
+                currentMode = "WORKING_NOT_CHECKED_IN";
+                shiftStatusLabel = "Đang trong ca (Chưa Check-in)";
+                statusDescription = $"Hiện đang trong ca làm việc ({shiftStartFormatted} – {shiftEndFormatted}) nhưng bạn chưa điểm danh vào ca. Hãy Check-in ngay hoặc làm giải trình nếu quên.";
+            }
+            else
+            {
+                currentMode = "CHECK_IN";
+                shiftStatusLabel = "Khung giờ vào ca";
+                statusDescription = $"Chào bạn! Hãy điểm danh Check-in vào ca làm việc ({shiftStartFormatted} – {shiftEndFormatted}).";
+            }
         }
 
-        var pcDevice = await _db.EmployeeDevices.AsNoTracking()
-            .FirstOrDefaultAsync(d => d.EmployeeCode == user.EmployeeCode && d.DeviceType == "PC" && d.IsActiveSlot, ct);
+        var devQuery = _db.EmployeeDevices.AsNoTracking()
+            .Where(d => d.EmployeeCode == user.EmployeeCode && d.DeviceType == "PC" && d.IsActiveSlot);
+        if (companyId.HasValue)
+        {
+            devQuery = devQuery.Where(d => d.CompanyId == companyId.Value || d.CompanyId == null);
+        }
+        var pcDevice = await devQuery.FirstOrDefaultAsync(ct);
 
         var clientIp = _geofenceService.ResolveClientIp(HttpContext);
 
@@ -100,6 +205,31 @@ public class AttendanceController : ControllerBase
             clientPublicIp = clientIp,
             pcMacAddress = pcDevice?.FingerprintHash,
             pcApprovalStatus = pcDevice?.ApprovalStatus,
+            allowCheckoutWithExplanation = needExplanation,
+            shift = new
+            {
+                shiftStart = shiftStartFormatted,
+                shiftEnd = shiftEndFormatted,
+                checkoutStartTime = checkoutStartFormatted,
+                checkoutPrepareMinutes,
+                lunchStart = lunchStartStr,
+                lunchMinutes,
+                standardRange = shiftHoursStr,
+                isCheckinWindow,
+                isWorkingWindow,
+                isCheckoutWindow,
+                isPastShiftEnd,
+                statusLabel = shiftStatusLabel,
+                statusDescription
+            },
+            explanationPrompt = needExplanation ? new
+            {
+                required = true,
+                suggestedDate = today.ToString("yyyy-MM-dd"),
+                suggestedInTime = shiftStartFormatted,
+                suggestedOutTime = nowLocal.ToString("HH:mm"),
+                reason = "Quên điểm danh vào ca khi đến giờ chuẩn bị ra về"
+            } : null,
             punches = punches.Select(p => new
             {
                 p.WebLogId,
@@ -119,11 +249,20 @@ public class AttendanceController : ControllerBase
     public async Task<IActionResult> Punch([FromBody] PunchRequestDto dto, CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode))
         {
             return BadRequest(new { code = "NO_EMPLOYEE", message = "Tài khoản chưa liên kết nhân viên." });
         }
+
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
+        if (primaryCompanyId.HasValue)
+        {
+            empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
+        }
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
+        int? companyId = emp?.CompanyId ?? primaryCompanyId;
 
         var rawDeviceSecret = Request.Headers["X-Device-Secret"].FirstOrDefault();
         var clientMac = Request.Headers["X-Device-Mac"].FirstOrDefault();
@@ -148,17 +287,24 @@ public class AttendanceController : ControllerBase
         dto.UserAgent = Request.Headers.UserAgent.ToString();
 
         var today = AttendancePunchService.ToVietnamTime(DateTime.UtcNow).Date;
-        var usableCount = await _db.WebAttendanceLogs.CountAsync(l =>
+        var countQuery = _db.WebAttendanceLogs.Where(l =>
             l.EmployeeCode == user.EmployeeCode &&
             l.WorkDate == today &&
-            (l.VerificationStatus == "VALID" || l.ReviewState == "ACCEPTED"), ct);
+            (l.VerificationStatus == "VALID" || l.ReviewState == "ACCEPTED"));
+
+        if (companyId.HasValue)
+        {
+            countQuery = countQuery.Where(l => l.CompanyId == companyId.Value || l.CompanyId == null);
+        }
+
+        var usableCount = await countQuery.CountAsync(ct);
 
         if (usableCount >= 2)
         {
             return BadRequest(new { code = "ALREADY_COMPLETED", message = "Hôm nay bạn đã thực hiện đủ 1 lượt Check-in và 1 lượt Check-out. Hệ thống không cho phép chấm công thêm để tránh dữ liệu trùng lặp." });
         }
 
-        var result = await _punchService.PunchAsync(user.EmployeeCode, rawDeviceSecret, clientIp, dto, ct);
+        var result = await _punchService.PunchAsync(user.EmployeeCode, rawDeviceSecret, clientIp, dto, companyId, ct);
         return Ok(result);
     }
 
@@ -167,22 +313,44 @@ public class AttendanceController : ControllerBase
     public async Task<IActionResult> GetHistory([FromQuery] string? from, [FromQuery] string? to, CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode)) return Ok(new List<object>());
+
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
+        if (primaryCompanyId.HasValue)
+        {
+            empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
+        }
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
+        int? companyId = emp?.CompanyId ?? primaryCompanyId;
 
         var fromDate = DateTime.TryParse(from, out var f) ? f.Date : DateTime.Today.AddDays(-30);
         var toDate = DateTime.TryParse(to, out var t) ? t.Date : DateTime.Today;
 
-        var punches = await _db.WebAttendanceLogs
+        var punchLogsQuery = _db.WebAttendanceLogs
             .AsNoTracking()
-            .Where(l => l.EmployeeCode == user.EmployeeCode && l.WorkDate >= fromDate && l.WorkDate <= toDate)
+            .Where(l => l.EmployeeCode == user.EmployeeCode && l.WorkDate >= fromDate && l.WorkDate <= toDate);
+
+        if (companyId.HasValue)
+        {
+            punchLogsQuery = punchLogsQuery.Where(l => l.CompanyId == companyId.Value || l.CompanyId == null);
+        }
+
+        var punches = await punchLogsQuery
             .OrderByDescending(l => l.CheckTimeUtc)
             .ToListAsync(ct);
 
-        var summaries = await _db.DailyPunchSummaries
+        var summariesQuery = _db.DailyPunchSummaries
             .AsNoTracking()
-            .Where(s => s.EmployeeCode == user.EmployeeCode && s.WorkDate >= fromDate && s.WorkDate <= toDate)
-            .ToDictionaryAsync(s => s.WorkDate, ct);
+            .Where(s => s.EmployeeCode == user.EmployeeCode && s.WorkDate >= fromDate && s.WorkDate <= toDate);
+
+        if (companyId.HasValue)
+        {
+            summariesQuery = summariesQuery.Where(s => s.CompanyId == companyId.Value);
+        }
+
+        var summaries = await summariesQuery.ToDictionaryAsync(s => s.WorkDate, ct);
 
         var grouped = punches.GroupBy(p => p.WorkDate).Select(g =>
         {
@@ -214,10 +382,16 @@ public class AttendanceController : ControllerBase
     public async Task<IActionResult> GetIssues([FromQuery] int? periodId, CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode)) return Ok(new List<object>());
 
-        var emp = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.EmployeeCode == user.EmployeeCode, ct);
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
+        if (primaryCompanyId.HasValue)
+        {
+            empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
+        }
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
         if (emp == null) return Ok(new List<object>());
 
         Period? period = null;
@@ -238,7 +412,7 @@ public class AttendanceController : ControllerBase
         // Tìm các ngày trong kỳ có bất thường từ DailyPunchSummary
         var summaries = await _db.DailyPunchSummaries
             .AsNoTracking()
-            .Where(s => s.EmployeeCode == user.EmployeeCode && s.WorkDate >= period.FromDate && s.WorkDate <= period.ToDate)
+            .Where(s => s.CompanyId == emp.CompanyId && s.EmployeeCode == user.EmployeeCode && s.WorkDate >= period.FromDate && s.WorkDate <= period.ToDate)
             .ToListAsync(ct);
 
         var issues = new List<object>();
@@ -263,7 +437,7 @@ public class AttendanceController : ControllerBase
 }
 
 [ApiController]
-[Authorize]
+[Authorize(Policy = "RequireHR")]
 [Route("api/v1/hr/punches")]
 [Route("api/hr/punches")]
 public class HrAttendanceController : ControllerBase
@@ -299,6 +473,7 @@ public class HrAttendanceController : ControllerBase
         [FromQuery] string? reviewState,
         [FromQuery] string? employeeCode,
         [FromQuery] bool? onlyValid,
+        [FromQuery] bool? onlyInvalid,
         [FromQuery] int? limit,
         CancellationToken ct)
     {
@@ -331,6 +506,11 @@ public class HrAttendanceController : ControllerBase
         {
             q = q.Where(l => (l.VerificationStatus == "VALID" && l.ReviewState != "REJECTED") || l.ReviewState == "ACCEPTED");
         }
+        else if (onlyInvalid == true || string.IsNullOrWhiteSpace(status) || status == "ALL")
+        {
+            // Đối với danh sách cần duyệt / cờ: CHỈ lấy các lượt KHÔNG hợp lệ hoặc đang chờ duyệt
+            q = q.Where(l => l.VerificationStatus != "VALID" || l.ReviewState == "PENDING");
+        }
 
         if (!string.IsNullOrWhiteSpace(branch))
         {
@@ -346,7 +526,7 @@ public class HrAttendanceController : ControllerBase
             }
         }
 
-        if (!string.IsNullOrWhiteSpace(status))
+        if (!string.IsNullOrWhiteSpace(status) && status != "ALL")
         {
             q = q.Where(l => l.VerificationStatus == status);
         }
@@ -360,27 +540,46 @@ public class HrAttendanceController : ControllerBase
         var logs = await q.OrderByDescending(l => l.CheckTimeUtc).Take(takeCount).ToListAsync(ct);
 
         var empCodes = logs.Select(l => l.EmployeeCode).Distinct().ToList();
-        var empList = await _db.Employees.AsNoTracking()
-            .Where(e => empCodes.Contains(e.EmployeeCode))
-            .ToListAsync(ct);
-        var empMap = empList.ToDictionary(e => e.EmployeeCode, e => e.FullName);
+        var compIds = logs.Select(l => l.CompanyId).Where(c => c.HasValue).Select(c => c!.Value).Distinct().ToList();
+        var empQuery = _db.Employees.AsNoTracking().Where(e => empCodes.Contains(e.EmployeeCode));
+        if (compIds.Any())
+        {
+            empQuery = empQuery.Where(e => compIds.Contains(e.CompanyId));
+        }
+        var empList = await empQuery.ToListAsync(ct);
+        var empMap = empList
+            .GroupBy(e => $"{e.CompanyId}_{e.EmployeeCode}", StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().FullName, StringComparer.OrdinalIgnoreCase);
 
         var deptIds = empList.Where(e => e.DepartmentId.HasValue).Select(e => e.DepartmentId!.Value).Distinct().ToList();
-        var deptMap = await _db.Departments.AsNoTracking()
+        var deptList = await _db.Departments.AsNoTracking()
             .Where(d => deptIds.Contains(d.Id))
-            .ToDictionaryAsync(d => d.Id, d => d.Name, ct);
+            .Select(d => new { d.Id, d.Name })
+            .ToListAsync(ct);
+        var deptMap = deptList
+            .GroupBy(d => d.Id)
+            .ToDictionary(g => g.Key, g => g.First().Name);
 
-        var empDeptMap = empList.ToDictionary(
-            e => e.EmployeeCode,
-            e => e.DepartmentId.HasValue && deptMap.TryGetValue(e.DepartmentId.Value, out var dn) ? dn : ""
-        );
+        var empDeptMap = empList
+            .GroupBy(e => $"{e.CompanyId}_{e.EmployeeCode}", StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                g => g.Key,
+                g =>
+                {
+                    var emp = g.First();
+                    return emp.DepartmentId.HasValue && deptMap.TryGetValue(emp.DepartmentId.Value, out var dn) ? dn : "";
+                },
+                StringComparer.OrdinalIgnoreCase
+            );
 
         // Lấy thông tin tóm tắt ngày vào / ra
         var workDates = logs.Select(l => l.WorkDate).Distinct().ToList();
         var summaries = await _db.DailyPunchSummaries.AsNoTracking()
-            .Where(s => empCodes.Contains(s.EmployeeCode) && workDates.Contains(s.WorkDate))
+            .Where(s => empCodes.Contains(s.EmployeeCode) && workDates.Contains(s.WorkDate) && (!compIds.Any() || compIds.Contains(s.CompanyId)))
             .ToListAsync(ct);
-        var summaryMap = summaries.ToDictionary(s => $"{s.EmployeeCode}_{s.WorkDate:yyyy-MM-dd}", s => s);
+        var summaryMap = summaries
+            .GroupBy(s => $"{s.CompanyId}_{s.EmployeeCode}_{s.WorkDate:yyyy-MM-dd}", StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
         var branchCodes = logs.Select(l => l.DetectedBranchCode).Where(c => !string.IsNullOrEmpty(c)).Distinct().ToList();
         var locList = await _db.BranchLocations.AsNoTracking()
@@ -395,13 +594,25 @@ public class HrAttendanceController : ControllerBase
 
         var result = logs.Select(l =>
         {
-            empMap.TryGetValue(l.EmployeeCode, out var empName);
-            empDeptMap.TryGetValue(l.EmployeeCode, out var deptName);
+            string empKey = l.CompanyId.HasValue ? $"{l.CompanyId}_{l.EmployeeCode}" : l.EmployeeCode;
+            if (!empMap.TryGetValue(empKey, out var empName))
+            {
+                empName = empList.FirstOrDefault(e => string.Equals(e.EmployeeCode, l.EmployeeCode, StringComparison.OrdinalIgnoreCase))?.FullName;
+            }
+            if (!empDeptMap.TryGetValue(empKey, out var deptName))
+            {
+                var fallbackEmp = empList.FirstOrDefault(e => string.Equals(e.EmployeeCode, l.EmployeeCode, StringComparison.OrdinalIgnoreCase));
+                deptName = fallbackEmp?.DepartmentId.HasValue == true && deptMap.TryGetValue(fallbackEmp.DepartmentId.Value, out var dn) ? dn : "";
+            }
             BranchLocation? loc = null;
             if (l.DetectedBranchCode != null) locMap.TryGetValue(l.DetectedBranchCode, out loc);
             devMap.TryGetValue(l.DeviceBindingId, out var devInfo);
 
-            summaryMap.TryGetValue($"{l.EmployeeCode}_{l.WorkDate:yyyy-MM-dd}", out var daySummary);
+            string sumKey = l.CompanyId.HasValue ? $"{l.CompanyId}_{l.EmployeeCode}_{l.WorkDate:yyyy-MM-dd}" : $"1_{l.EmployeeCode}_{l.WorkDate:yyyy-MM-dd}";
+            if (!summaryMap.TryGetValue(sumKey, out var daySummary))
+            {
+                daySummary = summaries.FirstOrDefault(s => string.Equals(s.EmployeeCode, l.EmployeeCode, StringComparison.OrdinalIgnoreCase) && s.WorkDate == l.WorkDate);
+            }
 
             return new
             {
@@ -496,4 +707,73 @@ public class HrAttendanceController : ControllerBase
     {
         return await DeletePunches(new DeletePunchesDto(new List<long> { id }), ct);
     }
+
+    /// <summary>HCNS/Admin xóa toàn bộ dữ liệu quẹt chấm công của một tháng/khoảng ngày cho hội sở.</summary>
+    [HttpDelete("by-range")]
+    public async Task<IActionResult> DeletePunchesByRange(
+        [FromQuery] string fromDate,
+        [FromQuery] string toDate,
+        [FromQuery] string? branch,
+        [FromQuery] int? companyId,
+        CancellationToken ct)
+    {
+        if (!User.IsHR()) return StatusCode(403, new { message = "Bạn không có quyền HCNS hoặc Quản trị viên." });
+
+        if (!DateTime.TryParse(fromDate, out var fromD) || !DateTime.TryParse(toDate, out var toD))
+        {
+            return BadRequest(new { message = "Khoảng ngày không hợp lệ." });
+        }
+
+        if (!string.IsNullOrWhiteSpace(branch))
+        {
+            await _access.EnsureBranchAsync(branch, ct);
+        }
+        else if (companyId.HasValue)
+        {
+            await _access.EnsureCompanyAsync(companyId.Value, ct);
+        }
+
+        var logQuery = _db.WebAttendanceLogs.Where(l => l.WorkDate >= fromD.Date && l.WorkDate <= toD.Date);
+        if (!string.IsNullOrWhiteSpace(branch))
+        {
+            logQuery = logQuery.Where(l => l.DetectedBranchCode == branch);
+        }
+        if (companyId.HasValue)
+        {
+            logQuery = logQuery.Where(l => l.CompanyId == companyId.Value || l.CompanyId == null);
+        }
+
+        var logs = await logQuery.ToListAsync(ct);
+        int logCount = logs.Count;
+        if (logCount > 0)
+        {
+            _db.WebAttendanceLogs.RemoveRange(logs);
+        }
+
+        // Xóa DailyPunchSummaries tương ứng
+        var sumQuery = _db.DailyPunchSummaries.Where(s => s.WorkDate >= fromD.Date && s.WorkDate <= toD.Date);
+        if (companyId.HasValue)
+        {
+            sumQuery = sumQuery.Where(s => s.CompanyId == companyId.Value);
+        }
+        var summaries = await sumQuery.ToListAsync(ct);
+        int sumCount = summaries.Count;
+        if (sumCount > 0)
+        {
+            _db.DailyPunchSummaries.RemoveRange(summaries);
+        }
+
+        await _db.SaveChangesAsync(ct);
+        _audit.Log("Attendance", 0, "DeletePunchesByRange",
+            $"Xóa {logCount} lượt quẹt và {sumCount} tổng hợp ngày từ {fromD:dd/MM/yyyy} đến {toD:dd/MM/yyyy}",
+            companyId: companyId);
+
+        return Ok(new
+        {
+            message = $"Đã xóa thành công {logCount} lượt quẹt chấm công và {sumCount} bản ghi tổng hợp ngày từ {fromD:dd/MM/yyyy} đến {toD:dd/MM/yyyy}.",
+            deletedLogs = logCount,
+            deletedSummaries = sumCount
+        });
+    }
 }
+

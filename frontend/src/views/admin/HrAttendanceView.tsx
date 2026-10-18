@@ -228,9 +228,11 @@ export const HrAttendanceView: React.FC = () => {
       if (activeTab === 'flags') {
         const list = await attendanceApi.getHrPunches({
           branch: branchCode,
-          status: flagFilter === 'ALL' ? undefined : flagFilter
+          status: flagFilter === 'ALL' ? undefined : flagFilter,
+          onlyInvalid: true
         });
-        setPunches(list);
+        const invalidList = (list || []).filter((p: any) => p.verificationStatus !== 'VALID' || p.reviewState === 'PENDING');
+        setPunches(invalidList);
       } else if (activeTab === 'devices') {
         const list = await devicesApi.getHrDevices(undefined, branchCode);
         setDevices(list);
@@ -339,6 +341,27 @@ export const HrAttendanceView: React.FC = () => {
       }
     } catch (err: any) {
       addToast(err.response?.data?.message || 'Có lỗi xảy ra khi xóa dữ liệu chấm công.', 'error');
+    }
+  };
+
+  // Xóa toàn bộ dữ liệu chấm công theo tháng / kỳ được chọn
+  const handleDeleteMonthAttendance = async () => {
+    if (!selectedPeriod) return;
+    if (!confirm(`CẢNH BÁO QUAN TRỌNG: Bạn có chắc chắn muốn xóa TOÀN BỘ dữ liệu chấm công của "${selectedPeriod.name}" (từ ${selectedPeriod.fromDate} đến ${selectedPeriod.toDate})? Thao tác này sẽ xóa tất cả các lượt quẹt chấm công web, mobile và tổng hợp ngày của hội sở trong kỳ này!`)) {
+      return;
+    }
+    try {
+      const res = await attendanceApi.deletePunchesByRange({
+        fromDate: selectedPeriod.fromDate,
+        toDate: selectedPeriod.toDate,
+        branch: branchCode,
+        companyId: selectedCompany?.id
+      });
+      addToast(res?.message || `Đã xóa dữ liệu chấm công ${selectedPeriod.name} thành công.`, 'success');
+      loadValidPunches();
+      loadData();
+    } catch (err: any) {
+      addToast(err.response?.data?.message || 'Lỗi khi xóa dữ liệu chấm công theo tháng.', 'error');
     }
   };
 
@@ -1057,28 +1080,53 @@ export const HrAttendanceView: React.FC = () => {
                 </select>
               </div>
 
-              {/* Nút Làm mới */}
-              <button
-                onClick={loadValidPunches}
-                disabled={loadingValid}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  padding: '8px 14px',
-                  borderRadius: 8,
-                  border: '1px solid #CBD5E1',
-                  backgroundColor: '#FFF',
-                  color: '#475569',
-                  fontSize: 13,
-                  fontWeight: 600,
-                  cursor: loadingValid ? 'wait' : 'pointer'
-                }}
-                title="Tải lại dữ liệu"
-              >
-                <RefreshCw size={14} className={loadingValid ? 'animate-spin' : ''} />
-                <span>Làm mới</span>
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {selectedPeriod && (
+                  <button
+                    onClick={handleDeleteMonthAttendance}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      padding: '8px 14px',
+                      borderRadius: 8,
+                      border: '1px solid #FECACA',
+                      backgroundColor: '#FEF2F2',
+                      color: '#DC2626',
+                      fontSize: 13,
+                      fontWeight: 600,
+                      cursor: 'pointer'
+                    }}
+                    title={`Xóa toàn bộ lượt quẹt chấm công của ${selectedPeriod.name}`}
+                  >
+                    <Trash2 size={14} color="#DC2626" />
+                    <span>Xóa dữ liệu tháng này</span>
+                  </button>
+                )}
+
+                {/* Nút Làm mới */}
+                <button
+                  onClick={loadValidPunches}
+                  disabled={loadingValid}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '8px 14px',
+                    borderRadius: 8,
+                    border: '1px solid #CBD5E1',
+                    backgroundColor: '#FFF',
+                    color: '#475569',
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: loadingValid ? 'wait' : 'pointer'
+                  }}
+                  title="Tải lại dữ liệu"
+                >
+                  <RefreshCw size={14} className={loadingValid ? 'animate-spin' : ''} />
+                  <span>Làm mới</span>
+                </button>
+              </div>
             </div>
 
             {/* Hàng 2: Tìm kiếm & Chế độ sắp xếp */}
@@ -1348,18 +1396,11 @@ export const HrAttendanceView: React.FC = () => {
                                             fontWeight: 600,
                                             backgroundColor: isApprove ? '#EFF6FF' : '#F0FDF4',
                                             border: `1px solid ${isApprove ? '#BFDBFE' : '#BBF7D0'}`,
-                                            color: isApprove ? '#1E40AF' : '#166534',
-                                            cursor: 'pointer'
+                                            color: isApprove ? '#1E40AF' : '#166534'
                                           }}
-                                          title={`Bấm xem chi tiết: ${punch.timeLocal} (${punch.channel === 'MOBILE_PWA' ? 'Điện thoại' : 'Máy tính'})`}
+                                          title={`Lượt chấm công hợp lệ: ${punch.timeLocal} (${punch.channel === 'MOBILE_PWA' ? 'Điện thoại' : 'Máy tính'})`}
                                         >
-                                          <div
-                                            onClick={() => {
-                                              setInspectPunch(punch);
-                                              setInspectNote(punch.reviewNote || '');
-                                            }}
-                                            style={{ display: 'flex', alignItems: 'center', gap: 4 }}
-                                          >
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                                             {punch.channel === 'MOBILE_PWA' ? <Smartphone size={11} /> : <Laptop size={11} />}
                                             <span>{punch.timeLocal}</span>
                                             {isApprove && (
@@ -1568,16 +1609,9 @@ export const HrAttendanceView: React.FC = () => {
                                               backgroundColor: isApprove ? '#EFF6FF' : '#F0FDF4',
                                               border: `1px solid ${isApprove ? '#BFDBFE' : '#BBF7D0'}`,
                                               color: isApprove ? '#1E40AF' : '#166534',
-                                              cursor: 'pointer'
                                             }}
                                           >
-                                            <div
-                                              onClick={() => {
-                                                setInspectPunch(punch);
-                                                setInspectNote(punch.reviewNote || '');
-                                              }}
-                                              style={{ display: 'flex', alignItems: 'center', gap: 4 }}
-                                            >
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                                               {punch.channel === 'MOBILE_PWA' ? <Smartphone size={10} /> : <Laptop size={10} />}
                                               <span>{punch.timeLocal}</span>
                                               {isApprove && <span style={{ fontSize: 9 }}>Duyệt</span>}

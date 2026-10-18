@@ -7,8 +7,9 @@ using Microsoft.EntityFrameworkCore;
 namespace ChamCong.Api.Controllers;
 
 [ApiController]
+[Route("api/v1/[controller]")]
 [Route("api/[controller]")]
-[Authorize]
+[Authorize(Policy = "RequireHR")]
 public class UsersController : ControllerBase
 {
     private readonly AppDbContext _db;

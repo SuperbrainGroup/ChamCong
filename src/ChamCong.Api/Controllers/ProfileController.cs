@@ -29,7 +29,7 @@ public class ProfileController : ControllerBase
     public async Task<IActionResult> GetMyProfile(CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null) return Unauthorized();
 
         if (string.IsNullOrWhiteSpace(user.EmployeeCode))
@@ -44,10 +44,14 @@ public class ProfileController : ControllerBase
             });
         }
 
-        var emp = await _db.Employees
-            .Include(e => e.DepartmentId)
-            .AsNoTracking()
-            .FirstOrDefaultAsync(e => e.EmployeeCode == user.EmployeeCode, ct);
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
+        if (primaryCompanyId.HasValue)
+        {
+            empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
+        }
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
+        int? companyId = emp?.CompanyId ?? primaryCompanyId;
 
         Department? dept = null;
         if (emp?.DepartmentId != null)
@@ -62,12 +66,18 @@ public class ProfileController : ControllerBase
         }
 
         // Hội sở phụ
-        var secondaryAssignments = await _db.EmployeeBranchAssignments
+        var secondaryQuery = _db.EmployeeBranchAssignments
             .AsNoTracking()
-            .Where(a => a.EmployeeCode == user.EmployeeCode && !a.IsPrimary && (a.ToDate == null || a.ToDate >= DateTime.Today))
-            .ToListAsync(ct);
+            .Where(a => a.EmployeeCode == user.EmployeeCode && !a.IsPrimary && (a.ToDate == null || a.ToDate >= DateTime.Today));
 
-        var devices = await _deviceService.GetMyDevicesAsync(user.EmployeeCode, ct);
+        if (companyId.HasValue)
+        {
+            secondaryQuery = secondaryQuery.Where(a => a.CompanyId == companyId.Value || a.CompanyId == null);
+        }
+
+        var secondaryAssignments = await secondaryQuery.ToListAsync(ct);
+
+        var devices = await _deviceService.GetMyDevicesAsync(user.EmployeeCode, companyId, ct);
 
         return Ok(new
         {
@@ -98,13 +108,19 @@ public class ProfileController : ControllerBase
     public async Task<IActionResult> GetLeaveBalance(CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode))
         {
             return Ok(new { available = 0, annualOpening = 0, carryOpening = 0, compOpening = 0, used = 0, held = 0 });
         }
 
-        var emp = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.EmployeeCode == user.EmployeeCode, ct);
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
+        if (primaryCompanyId.HasValue)
+        {
+            empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
+        }
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
         if (emp == null) return Ok(new { available = 0 });
 
         int year = DateTime.Today.Year;
@@ -119,13 +135,19 @@ public class ProfileController : ControllerBase
             .Where(l => l.EmployeeId == emp.Id && l.Year == year)
             .SumAsync(l => (decimal?)l.Amount, ct) ?? 0m;
 
-        var heldDays = await _db.EmployeeRequests
+        var heldDaysQuery = _db.EmployeeRequests
             .AsNoTracking()
             .Where(r => r.EmployeeCode == user.EmployeeCode &&
                         r.RequestType == "LEAVE" &&
                         r.Status == "PENDING_HR" &&
-                        r.FromDate.Year == year)
-            .SumAsync(r => (decimal?)r.DaysRequested, ct) ?? 0m;
+                        r.FromDate.Year == year);
+
+        if (emp.CompanyId > 0)
+        {
+            heldDaysQuery = heldDaysQuery.Where(r => r.CompanyId == emp.CompanyId || r.CompanyId == null);
+        }
+
+        var heldDays = await heldDaysQuery.SumAsync(r => (decimal?)r.DaysRequested, ct) ?? 0m;
 
         decimal totalOpening = annualOpening + carryOpening + compOpening;
         decimal available = Math.Max(0m, totalOpening - ledgerDeducted - heldDays);

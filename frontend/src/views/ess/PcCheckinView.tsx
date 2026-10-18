@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { usePlatform } from '../../context/PlatformContext';
@@ -41,7 +41,8 @@ import {
   Send,
   HelpCircle,
   ChevronRight,
-  Info
+  Info,
+  Lock
 } from 'lucide-react';
 
 interface PcCheckinViewProps {
@@ -72,16 +73,33 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
   const [punchState, setPunchState] = useState<PunchState | null>(null);
   const [punching, setPunching] = useState(false);
   const [punchCooldownSeconds, setPunchCooldownSeconds] = useState<number>(0);
-  const [forceEnableCheckout, setForceEnableCheckout] = useState(false);
 
   // Đồng hồ thời gian thực
   const [currentTime, setCurrentTime] = useState(new Date());
+
+  // Tự động kiểm tra cập nhật trạng thái mở nút Check-out khi đang trong ca
+  useEffect(() => {
+    if (!punchState?.hasValidCheckin || punchState?.canCheckout || punchState?.currentMode === 'COMPLETED') return;
+    const interval = setInterval(async () => {
+      try {
+        const state = await attendanceApi.getState();
+        setPunchState(state);
+      } catch {}
+    }, 20000);
+    return () => clearInterval(interval);
+  }, [punchState?.hasValidCheckin, punchState?.canCheckout, punchState?.currentMode]);
+
+  // Tự động nhận diện loại thiết bị đang truy cập
+  const isCurrentClientMobile = useMemo(() => {
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) || (window.innerWidth <= 768 && !window.location.search.includes('desktop'));
+  }, []);
 
   // Thiết bị & MAC Address (chỉ đọc - không cho phép chỉnh sửa để tránh gian lận)
   const [myDevices, setMyDevices] = useState<{ mobile: EmployeeDevice | null; pc: EmployeeDevice | null }>({ mobile: null, pc: null });
   const [macAddress, setMacAddress] = useState<string>('');
   const [copiedMac, setCopiedMac] = useState(false);
   const [registeringMac, setRegisteringMac] = useState(false);
+  const [registeringMobile, setRegisteringMobile] = useState(false);
 
   // Lịch sử & Thống kê
   const [attendanceHistory, setAttendanceHistory] = useState<any[]>([]);
@@ -164,6 +182,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
     setIsRefreshing(true);
     try {
       await loadInitialData();
+      window.dispatchEvent(new CustomEvent('notification-updated'));
       if (activeTab === 'history') {
         const hist = await attendanceApi.getHistory();
         setAttendanceHistory(hist);
@@ -232,6 +251,35 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
     }
   };
 
+  // Đăng ký thiết bị di động (khi truy cập từ Mobile)
+  const handleRegisterMobile = async () => {
+    setRegisteringMobile(true);
+    try {
+      const os = /iPhone|iPad/i.test(navigator.userAgent) ? 'iOS' :
+        /Android/i.test(navigator.userAgent) ? 'Android' : 'Mobile';
+      const browser = /Chrome/i.test(navigator.userAgent) ? 'Chrome Mobile' :
+        /Safari/i.test(navigator.userAgent) ? 'Safari Mobile' : 'Mobile Browser';
+      const fp = getOrInitMacAddress();
+      const res = await devicesApi.register({
+        deviceType: 'MOBILE',
+        deviceName: `Mobile - ${user?.fullName || 'Di động'}`,
+        operatingSystem: os,
+        browserInfo: browser,
+        fingerprintHash: fp
+      });
+      if (res.secretToken) {
+        localStorage.setItem('device_secret', res.secretToken);
+      }
+      addToast(res.message || 'Đăng ký thiết bị di động thành công! Đang chờ HCNS phê duyệt hoặc đã được kích hoạt.', 'success');
+      const devs = await devicesApi.getMyDevices();
+      setMyDevices(devs);
+    } catch (err: any) {
+      addToast(err.response?.data?.message || 'Không thể đăng ký thiết bị di động.', 'error');
+    } finally {
+      setRegisteringMobile(false);
+    }
+  };
+
   // Thao tác sao chép MAC (chỉ đọc - không cho chỉnh sửa)
   const handleCopyMac = () => {
     if (macAddress) {
@@ -242,10 +290,28 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
     }
   };
 
+  // Mở nhanh modal giải trình công đã điền sẵn giờ vào ca sáng
+  const handleOpenQuickRegularization = () => {
+    const todayStr = punchState?.workDate || new Date().toISOString().split('T')[0];
+    const shiftStart = punchState?.shift?.shiftStart || '08:00';
+    const nowTimeStr = currentTime.toTimeString().substring(0, 5);
+    setRegulDate(todayStr);
+    setRegulInTime(shiftStart);
+    setRegulOutTime(nowTimeStr);
+    setRegulReasonCode('Quên bấm');
+    setRegulReason('Quên điểm danh vào ca khi đến giờ chuẩn bị ra về');
+    setShowRegulModal(true);
+  };
+
   // THỰC HIỆN ĐIỂM DANH CHECK-IN / CHECK-OUT TRÊN PC
-  const handlePcPunch = async () => {
+  const handlePcPunch = async (specificType?: 'AUTO' | 'CHECK_IN' | 'CHECK_OUT') => {
     if (punchState?.currentMode === 'COMPLETED') {
       addToast('Hôm nay bạn đã hoàn thành đủ 1 lượt Check-in và 1 lượt Check-out. Hệ thống không cho phép chấm công thêm để tránh dữ liệu trùng lặp.', 'info');
+      return;
+    }
+
+    if (punchState?.hasValidCheckin && !punchState?.canCheckout) {
+      addToast(`Bạn vừa Check-in lúc ${punchState?.firstPunchTime || ''}. Để tránh bấm nhầm Check-out khi vừa vào làm, ca làm việc cần tối thiểu 30 phút trước khi Check-out (còn lại ${punchState?.remainingMinutesToCheckout ?? 30} phút).`, 'warning');
       return;
     }
 
@@ -275,13 +341,14 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
     setPunching(true);
 
     try {
+      const targetPunchType = specificType || (punchState?.canCheckout ? 'CHECK_OUT' : (punchState?.currentMode === 'NEED_EXPLANATION' ? 'CHECK_OUT' : 'AUTO'));
       const result = await attendanceApi.punch({
         channel: 'PC_WEB',
-        macAddress: currentMac
+        macAddress: currentMac,
+        punchType: targetPunchType
       });
 
       setPunchCooldownSeconds(60);
-      setForceEnableCheckout(false);
 
       const state = await attendanceApi.getState();
       setPunchState(state);
@@ -290,10 +357,15 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
       setMyDevices(devs);
 
       const timeStr = result.checkTimeLocal ? (result.checkTimeLocal.split(' ')[1] || result.checkTimeLocal) : '';
-      const isCheckoutAction = punchState?.currentMode === 'CHECK_OUT' || forceEnableCheckout;
+      const isCheckoutAction = targetPunchType === 'CHECK_OUT' || punchState?.canCheckout;
       const modeLabel = isCheckoutAction ? 'Ra về (Check-out)' : 'Vào làm (Check-in)';
 
-      addToast(`✅ Điểm danh ${modeLabel} thành công! Giờ ghi nhận: ${timeStr} (MAC: ${currentMac})`, 'success');
+      if (result.needsExplanation) {
+        addToast(`✅ Điểm danh ${modeLabel} thành công! Giờ ghi nhận: ${timeStr}. Vui lòng nộp giải trình bổ sung giờ vào ca sáng.`, 'warning');
+        handleOpenQuickRegularization();
+      } else {
+        addToast(`✅ Điểm danh ${modeLabel} thành công! Giờ ghi nhận: ${timeStr} (MAC: ${currentMac})`, 'success');
+      }
 
       // Tải lại lịch sử nếu tab history mở
       if (activeTab === 'history') {
@@ -333,6 +405,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
       setLeaveFiles([]);
       const reqs = await requestsApi.getMyRequests();
       setMyRequests(reqs);
+      window.dispatchEvent(new CustomEvent('notification-updated'));
     } catch (err: any) {
       addToast(err.response?.data?.message || 'Có lỗi khi gửi đơn.', 'error');
     }
@@ -359,18 +432,65 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
       setRegulFiles([]);
       const reqs = await requestsApi.getMyRequests();
       setMyRequests(reqs);
+      window.dispatchEvent(new CustomEvent('notification-updated'));
     } catch (err: any) {
       addToast(err.response?.data?.message || 'Có lỗi khi gửi giải trình.', 'error');
     }
   };
 
   // Tính trạng thái chấm công (mỗi ngày 1 lần Check-in, 1 lần Check-out)
-  const isCompleted = punchState?.currentMode === 'COMPLETED';
-  const isWorking = punchState?.currentMode === 'CHECKED_IN' && !forceEnableCheckout && !isCompleted;
-  const isCheckout = (punchState?.currentMode === 'CHECK_OUT' || forceEnableCheckout) && !isCompleted;
+  const isCompleted = punchState?.currentMode === 'COMPLETED' || (punchState?.todayPunchCount !== undefined && punchState.todayPunchCount >= 2);
+  const isNeedExplanation = punchState?.currentMode === 'NEED_EXPLANATION' && !isCompleted;
+  const isWorkingNotCheckedIn = punchState?.currentMode === 'WORKING_NOT_CHECKED_IN' && !isCompleted;
+  const isWorking = (punchState?.currentMode === 'CHECKED_IN' || punchState?.currentMode === 'WORKING') && !isCompleted;
+  const isCheckout = punchState?.currentMode === 'CHECK_OUT' && !isCompleted;
 
   return (
     <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
+      {/* CẢNH BÁO NẾU TÀI KHOẢN CHƯA LIÊN KẾT MÃ NHÂN VIÊN */}
+      {!user?.employeeCode && (
+        <div style={{
+          backgroundColor: '#FFFBEB',
+          border: '1px solid #FDE68A',
+          borderRadius: '12px',
+          padding: '14px 18px',
+          color: '#92400E',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '12px'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <AlertTriangle size={20} color="#D97706" />
+            <div>
+              <div style={{ fontWeight: 800, fontSize: '14px' }}>Tài khoản này chưa liên kết với Mã Nhân Viên</div>
+              <div style={{ fontSize: '13px', color: '#B45309', marginTop: '2px' }}>
+                Để sử dụng đầy đủ tính năng điểm danh cá nhân hoặc nộp đơn cho chính mình, bạn cần liên kết tài khoản này với một Mã Nhân viên trong hệ thống.
+              </div>
+            </div>
+          </div>
+          {(user?.role === 'Admin' || user?.role === 'HR') && onNavigate && (
+            <button
+              type="button"
+              onClick={() => onNavigate('admin-users')}
+              style={{
+                backgroundColor: '#0056B3',
+                color: '#FFFFFF',
+                border: 'none',
+                borderRadius: '8px',
+                padding: '8px 14px',
+                fontSize: '12px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              Liên kết Mã NV ngay →
+            </button>
+          )}
+        </div>
+      )}
+
       {/* 2. THẺ TỔNG QUAN & ĐỒNG HỒ THỜI GIAN THỰC (4 STAT CARDS) */}
       <div style={{
         display: 'grid',
@@ -412,12 +532,12 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
             fontSize: '18px',
             fontWeight: 800,
             marginTop: '6px',
-            color: isCompleted ? '#16A34A' : isWorking ? '#0056B3' : '#D97706'
+            color: isCompleted ? '#16A34A' : isWorking ? '#0056B3' : isCheckout ? '#16A34A' : isNeedExplanation ? '#DC2626' : '#D97706'
           }}>
-            {isCompleted ? '✅ Đã hoàn thành ca' : isWorking ? '⚡ Đang trong ca làm' : '🕒 Chưa bấm Check-in'}
+            {isCompleted ? '✅ Đã hoàn thành ca' : isWorking ? '⚡ Đang trong ca làm' : isCheckout ? '🕒 Chuẩn bị tan ca & Checkout' : isNeedExplanation ? '⚠️ Chưa Check-in (Cần giải trình)' : isWorkingNotCheckedIn ? '⚠️ Đang trong ca (Chưa Check-in)' : '🕒 Chưa bấm Check-in'}
           </div>
           <div style={{ fontSize: '12px', color: '#64748B', marginTop: '6px' }}>
-            {punchState?.firstPunchTime ? `Vào: ${punchState.firstPunchTime}` : 'Chưa có giờ vào'}
+            {punchState?.firstPunchTime ? `Vào: ${punchState.firstPunchTime}` : (punchState?.shift ? `Ca: ${punchState.shift.shiftStart} – ${punchState.shift.shiftEnd}` : 'Chưa có giờ vào')}
             {punchState?.lastPunchTime ? ` · Ra: ${punchState.lastPunchTime}` : ''}
           </div>
         </div>
@@ -461,108 +581,6 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
         </div>
       </div>
 
-      {/* 3. TABS NỘI BỘ (chỉ hiện khi không có onNavigate - tức là dùng standalone không qua Navbar trên) */}
-      {!onNavigate && (
-        <div style={{
-          backgroundColor: '#FFFFFF',
-          border: '1px solid #E2E8F0',
-          borderRadius: '12px',
-          padding: '6px 8px',
-          display: 'flex',
-          gap: '6px',
-          boxShadow: '0 1px 2px rgba(0,0,0,0.02)'
-        }}>
-          <button
-            type="button"
-            onClick={() => setActiveTab('checkin')}
-            style={{
-              padding: '8px 18px',
-              borderRadius: '8px',
-              border: 'none',
-              fontSize: '13px',
-              fontWeight: 700,
-              cursor: 'pointer',
-              backgroundColor: activeTab === 'checkin' ? '#0056B3' : 'transparent',
-              color: activeTab === 'checkin' ? '#FFFFFF' : '#475569',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              transition: 'all 0.15s ease'
-            }}
-          >
-            <Clock size={16} />
-            Điểm Danh (Check-in / Out)
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('history')}
-            style={{
-              padding: '8px 18px',
-              borderRadius: '8px',
-              border: 'none',
-              fontSize: '13px',
-              fontWeight: 700,
-              cursor: 'pointer',
-              backgroundColor: activeTab === 'history' ? '#0056B3' : 'transparent',
-              color: activeTab === 'history' ? '#FFFFFF' : '#475569',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              transition: 'all 0.15s ease'
-            }}
-          >
-            <Calendar size={16} />
-            Lịch Sử Điểm Danh
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('requests')}
-            style={{
-              padding: '8px 18px',
-              borderRadius: '8px',
-              border: 'none',
-              fontSize: '13px',
-              fontWeight: 700,
-              cursor: 'pointer',
-              backgroundColor: activeTab === 'requests' ? '#0056B3' : 'transparent',
-              color: activeTab === 'requests' ? '#FFFFFF' : '#475569',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              transition: 'all 0.15s ease'
-            }}
-          >
-            <FileText size={16} />
-            Đơn Nghỉ Phép & Giải Trình
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('device')}
-            style={{
-              padding: '8px 18px',
-              borderRadius: '8px',
-              border: 'none',
-              fontSize: '13px',
-              fontWeight: 700,
-              cursor: 'pointer',
-              backgroundColor: activeTab === 'device' ? '#0056B3' : 'transparent',
-              color: activeTab === 'device' ? '#FFFFFF' : '#475569',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              transition: 'all 0.15s ease'
-            }}
-          >
-            <Monitor size={16} />
-            Thông Tin Máy Tính & MAC
-          </button>
-        </div>
-      )}
-
-      {/* ============================================================== */}
       {/* TAB 1: ĐIỂM DANH CHECK-IN / CHECK-OUT TRÊN PC                  */}
       {/* ============================================================== */}
       {activeTab === 'checkin' && (
@@ -600,70 +618,10 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                   <div style={{ fontSize: '13px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase' }}>
                     ĐỊA CHỈ MAC XÁC THỰC CỦA MÁY TÍNH
                   </div>
-                  {isMacRegistered ? (
-                    isMacMatch ? (
-                      <span style={{
-                        backgroundColor: '#DCFCE7',
-                        color: '#166534',
-                        padding: '2px 8px',
-                        borderRadius: '6px',
-                        fontSize: '11px',
-                        fontWeight: 700,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px'
-                      }}>
-                        <CheckCircle2 size={12} />
-                        Khớp MAC chính chủ
-                      </span>
-                    ) : (
-                      <span style={{
-                        backgroundColor: '#FEE2E2',
-                        color: '#991B1B',
-                        padding: '2px 8px',
-                        borderRadius: '6px',
-                        fontSize: '11px',
-                        fontWeight: 700,
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px'
-                      }}>
-                        <XCircle size={12} />
-                        Sai máy tính (Không khớp)
-                      </span>
-                    )
-                  ) : (
-                    <span style={{
-                      backgroundColor: '#FEF3C7',
-                      color: '#92400E',
-                      padding: '2px 8px',
-                      borderRadius: '6px',
-                      fontSize: '11px',
-                      fontWeight: 700,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '4px'
-                    }}>
-                      <AlertTriangle size={12} />
-                      Chưa đăng ký MAC
-                    </span>
-                  )}
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '4px' }}>
-                  <span style={{
-                    fontFamily: 'Consolas, Monaco, monospace',
-                    fontSize: '18px',
-                    fontWeight: 800,
-                    color: isMacMismatch ? '#DC2626' : '#0056B3',
-                    backgroundColor: isMacMismatch ? '#FEF2F2' : '#F1F5F9',
-                    padding: '4px 12px',
-                    borderRadius: '6px',
-                    letterSpacing: '1px'
-                  }}>
-                    {currentMac || 'Đang nhận diện...'}
-                  </span>
-
+                  {currentMac || 'Đang nhận diện...'}
                   <button
                     type="button"
                     onClick={handleCopyMac}
@@ -709,54 +667,6 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 )}
               </div>
             </div>
-
-            <div style={{
-              backgroundColor: '#F8FAFC',
-              border: '1px dashed #CBD5E1',
-              borderRadius: '10px',
-              padding: '10px 16px',
-              fontSize: '12px',
-              color: '#475569',
-              maxWidth: '360px'
-            }}>
-              {!isMacRegistered && (
-                <div style={{
-                  marginTop: '10px',
-                  backgroundColor: '#FFFBEB',
-                  border: '1px solid #FDE68A',
-                  borderRadius: '8px',
-                  padding: '8px 12px',
-                  fontSize: '12px',
-                  color: '#92400E',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: '8px'
-                }}>
-                  <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <AlertTriangle size={15} color="#D97706" />
-                    Tài khoản <strong>chưa đăng ký MAC</strong> cho máy tính này. Vui lòng đăng ký trước khi chấm công.
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('device')}
-                    style={{
-                      backgroundColor: '#0056B3',
-                      color: '#FFFFFF',
-                      border: 'none',
-                      borderRadius: '6px',
-                      padding: '4px 10px',
-                      fontSize: '11px',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      whiteSpace: 'nowrap'
-                    }}
-                  >
-                    Đến Tab Đăng Ký
-                  </button>
-                </div>
-              )}
-            </div>
           </div>
 
           {/* KHUNG THAO TÁC CHẤM CÔNG LỚN (ACTION PUNCH PANEL) */}
@@ -783,111 +693,182 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 {currentTime.toLocaleTimeString('vi-VN')}
               </div>
 
-              {/* Hướng dẫn trạng thái hiện tại */}
+              {/* THÔNG TIN CA LÀM VIỆC CỦA HỘI SỞ */}
+              {punchState?.shift && (
+                <div style={{
+                  backgroundColor: '#F8FAFC',
+                  border: '1px solid #E2E8F0',
+                  borderRadius: '10px',
+                  padding: '8px 14px',
+                  fontSize: '12px',
+                  color: '#475569',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  marginBottom: '16px',
+                  flexWrap: 'wrap'
+                }}>
+                  <Clock size={15} color="#0056B3" />
+                  <span>Ca làm việc: <strong>{punchState.shift.shiftStart} – {punchState.shift.shiftEnd}</strong></span>
+                  <span>•</span>
+                  <span>Nghỉ trưa: <strong>{punchState.shift.lunchStart} ({punchState.shift.lunchMinutes}p)</strong></span>
+                  <span>•</span>
+                  <span>Chuẩn bị ra về từ: <strong style={{ color: '#16A34A' }}>{punchState.shift.checkoutStartTime}</strong></span>
+                </div>
+              )}
+
+              {/* Trạng thái hiện tại */}
               <div style={{
-                padding: '14px 18px',
-                borderRadius: '10px',
-                backgroundColor: isCompleted ? '#F0FDF4' : isWorking ? '#EFF6FF' : '#FFFBEB',
-                border: `1px solid ${isCompleted ? '#BBF7D0' : isWorking ? '#BFDBFE' : '#FDE68A'}`,
-                color: isCompleted ? '#166534' : isWorking ? '#1E40AF' : '#92400E',
+                padding: '12px 18px',
+                borderRadius: '8px',
+                backgroundColor: isCompleted ? '#F0FDF4' : isWorking ? '#EFF6FF' : isCheckout ? '#ECFDF5' : isNeedExplanation ? '#FFF7ED' : isWorkingNotCheckedIn ? '#FEF2F2' : '#FFFBEB',
+                border: `1px solid ${isCompleted ? '#BBF7D0' : isWorking ? '#BFDBFE' : isCheckout ? '#A7F3D0' : isNeedExplanation ? '#FDBA74' : isWorkingNotCheckedIn ? '#FECACA' : '#FDE68A'}`,
+                color: isCompleted ? '#166534' : isWorking ? '#1E40AF' : isCheckout ? '#065F46' : isNeedExplanation ? '#9A3412' : isWorkingNotCheckedIn ? '#991B1B' : '#92400E',
                 fontSize: '13px',
                 fontWeight: 600,
-                marginBottom: '24px',
+                marginBottom: '20px',
+                whiteSpace: 'normal',
+                textAlign: 'center',
                 lineHeight: 1.5
               }}>
                 {isCompleted ? (
-                  <div>
-                    <div style={{ fontSize: '15px', fontWeight: 800, color: '#15803D', marginBottom: '4px' }}>
-                      🎉 Đã hoàn tất chấm công hôm nay!
-                    </div>
-                    <div>
-                      Bạn đã thực hiện đủ <b>1 lượt Check-in</b> (Vào: <b>{punchState?.firstPunchTime}</b>) và <b>1 lượt Check-out</b> (Ra: <b>{punchState?.lastPunchTime}</b>).
-                    </div>
-                    <div style={{ fontSize: '12px', color: '#166534', marginTop: '4px' }}>
-                      Hệ thống đã khóa điểm danh trong ngày để tránh dữ liệu rác và bảo đảm tính chính xác của bảng công.
-                    </div>
-                  </div>
+                  <span>✅ Đã hoàn tất ca hôm nay (Vào: <b>{punchState?.firstPunchTime}</b> — Ra: <b>{punchState?.lastPunchTime}</b>)</span>
                 ) : isWorking ? (
-                  <div>
-                    ⚡ Bạn đã check-in lúc <b>{punchState?.firstPunchTime}</b>. Bạn có thể bấm Check-out sau 30 phút làm việc.
-                  </div>
+                  <span>⚡ Đang trong ca làm việc (Check-in lúc: <b>{punchState?.firstPunchTime}</b> — Giờ tan ca: <b>{punchState?.shift?.shiftEnd || '17:00'}</b>)</span>
+                ) : isCheckout ? (
+                  <span>⚡ Đã đến khung giờ chuẩn bị ra về ({punchState?.shift?.checkoutStartTime || '16:30'} – {punchState?.shift?.shiftEnd || '17:00'})! Bạn có thể điểm danh Ra về.</span>
+                ) : isNeedExplanation ? (
+                  <span>⚠️ <strong>Bạn chưa điểm danh vào ca lúc sáng.</strong> Hiện tại ({currentTime.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}) đang là khung giờ chuẩn bị ra về ({punchState?.shift?.checkoutStartTime || '16:30'} – {punchState?.shift?.shiftEnd || '17:00'}). Cần gửi đơn giải trình để được ghi nhận công.</span>
+                ) : isWorkingNotCheckedIn ? (
+                  <span>⚠️ Đang trong giờ làm việc ({punchState?.shift?.shiftStart} – {punchState?.shift?.shiftEnd}) nhưng bạn chưa điểm danh vào ca! Hãy Check-in ngay hoặc làm giải trình nếu quên.</span>
                 ) : (
-                  <div>
-                    👋 Chào ngày mới, {user?.fullName}! Bấm nút bên dưới để ghi nhận giờ bắt đầu làm việc.
-                  </div>
+                  <span>👋 Chưa bấm Check-in ca làm việc hôm nay ({punchState?.shift?.shiftStart || '08:00'} – {punchState?.shift?.shiftEnd || '17:00'})</span>
                 )}
               </div>
 
-              {/* NÚT BẤM CHẤM CÔNG LỚN (CHUẨN WEB ADMIN ACTION BUTTON) */}
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px' }}>
-                <button
-                  type="button"
-                  onClick={handlePcPunch}
-                  disabled={punching || punchCooldownSeconds > 0 || isCompleted}
-                  style={{
-                    width: '100%',
-                    maxWidth: isCompleted ? '460px' : '380px',
-                    height: '58px',
-                    backgroundColor: isCompleted ? '#0D9488' : punchCooldownSeconds > 0 ? '#64748B' : isCheckout ? '#16A34A' : '#0056B3',
-                    color: '#FFFFFF',
-                    border: isCompleted ? '2px solid #5EEAD4' : 'none',
-                    borderRadius: '12px',
-                    fontSize: isCompleted ? '15px' : '16px',
-                    fontWeight: 800,
-                    cursor: (punching || punchCooldownSeconds > 0 || isCompleted) ? 'not-allowed' : 'pointer',
-                    boxShadow: (punchCooldownSeconds > 0 || isCompleted) ? 'none' : '0 4px 14px rgba(0, 86, 179, 0.35)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '10px',
-                    transition: 'all 0.2s ease',
-                    opacity: isCompleted ? 0.95 : 1
-                  }}
-                >
-                  {punching ? (
-                    <>
-                      <RefreshCw size={20} style={{ animation: 'spin 0.8s linear infinite' }} />
-                      Đang xử lý điểm danh...
-                    </>
-                  ) : punchCooldownSeconds > 0 ? (
-                    <>
-                      <Clock size={20} />
-                      Đợi giãn cách {punchCooldownSeconds}s
-                    </>
-                  ) : isCompleted ? (
-                    <>
-                      <CheckCircle2 size={22} />
-                      ĐÃ HOÀN TẤT CHẤM CÔNG (1/1 IN, 1/1 OUT)
-                    </>
-                  ) : isCheckout ? (
-                    <>
-                      <CheckCircle2 size={22} />
-                      CHẤM CÔNG RA VỀ (CHECK-OUT)
-                    </>
-                  ) : (
-                    <>
-                      <Clock size={22} />
-                      CHẤM CÔNG VÀO LÀM (CHECK-IN)
-                    </>
-                  )}
-                </button>
+              {/* NÚT BẤM CHẤM CÔNG HOẶC NÚT GIẢI TRÌNH THÔNG MINH */}
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px', width: '100%' }}>
+                {isNeedExplanation ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px', width: '100%', maxWidth: '440px' }}>
+                    <button
+                      type="button"
+                      onClick={handleOpenQuickRegularization}
+                      style={{
+                        width: '100%',
+                        height: '56px',
+                        backgroundColor: '#D97706',
+                        color: '#FFFFFF',
+                        border: 'none',
+                        borderRadius: '12px',
+                        fontSize: '15px',
+                        fontWeight: 800,
+                        cursor: 'pointer',
+                        boxShadow: '0 4px 14px rgba(217, 119, 6, 0.35)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '10px'
+                      }}
+                    >
+                      <FileText size={20} />
+                      GỬI ĐƠN GIẢI TRÌNH BỔ SUNG CÔNG (1 CHẠM)
+                    </button>
 
-                {/* Nút mở Check-out sớm nếu nhân viên cần về trước 30 phút */}
-                {isWorking && !forceEnableCheckout && !isCompleted && (
+                    {punchState?.allowCheckoutWithExplanation && (
+                      <button
+                        type="button"
+                        onClick={() => handlePcPunch('CHECK_OUT')}
+                        disabled={punching || punchCooldownSeconds > 0}
+                        style={{
+                          width: '100%',
+                          height: '46px',
+                          backgroundColor: '#F8FAFC',
+                          color: '#16A34A',
+                          border: '1px solid #86EFAC',
+                          borderRadius: '10px',
+                          fontSize: '13px',
+                          fontWeight: 700,
+                          cursor: (punching || punchCooldownSeconds > 0) ? 'not-allowed' : 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '8px'
+                        }}
+                      >
+                        <Clock size={16} />
+                        Điểm danh ra về (Check-out) kèm giải trình
+                      </button>
+                    )}
+
+                    <div style={{ fontSize: '11px', color: '#64748B', textAlign: 'center' }}>
+                      💡 Hệ thống tự nhận diện đang trong khung giờ chuẩn bị ra về và chuyển đổi nút bấm để tránh bạn bị check-in nhầm lúc tan làm.
+                    </div>
+                  </div>
+                ) : (
                   <button
                     type="button"
-                    onClick={() => setForceEnableCheckout(true)}
+                    onClick={() => handlePcPunch()}
+                    disabled={punching || punchCooldownSeconds > 0 || isCompleted || isWorking}
                     style={{
-                      background: 'none',
-                      border: 'none',
-                      color: '#D97706',
-                      fontSize: '12px',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      textDecoration: 'underline'
+                      width: '100%',
+                      maxWidth: isCompleted ? '460px' : isWorking ? '480px' : '380px',
+                      height: '58px',
+                      backgroundColor: isCompleted
+                        ? '#0D9488'
+                        : isWorking
+                        ? '#F1F5F9'
+                        : punchCooldownSeconds > 0
+                        ? '#64748B'
+                        : isCheckout
+                        ? '#16A34A'
+                        : '#0056B3',
+                      color: isWorking ? '#64748B' : '#FFFFFF',
+                      border: isCompleted ? '2px solid #5EEAD4' : isWorking ? '1px solid #CBD5E1' : 'none',
+                      borderRadius: '12px',
+                      fontSize: isCompleted || isWorking ? '14px' : '16px',
+                      fontWeight: 800,
+                      cursor: (punching || punchCooldownSeconds > 0 || isCompleted || isWorking) ? 'not-allowed' : 'pointer',
+                      boxShadow: (punchCooldownSeconds > 0 || isCompleted || isWorking) ? 'none' : '0 4px 14px rgba(0, 86, 179, 0.35)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '10px',
+                      transition: 'all 0.2s ease',
+                      opacity: isCompleted ? 0.95 : 1
                     }}
                   >
-                    Cần ra về sớm hơn 30 phút? Bấm vào đây để mở nút Check-out
+                    {punching ? (
+                      <>
+                        <RefreshCw size={20} style={{ animation: 'spin 0.8s linear infinite' }} />
+                        Đang xử lý điểm danh...
+                      </>
+                    ) : punchCooldownSeconds > 0 ? (
+                      <>
+                        <Clock size={20} />
+                        Đợi giãn cách {punchCooldownSeconds}s
+                      </>
+                    ) : isCompleted ? (
+                      <>
+                        <CheckCircle2 size={22} />
+                        ĐÃ HOÀN TẤT CHẤM CÔNG (1/1 IN, 1/1 OUT)
+                      </>
+                    ) : isWorking ? (
+                      <>
+                        <Lock size={20} color="#64748B" />
+                        ĐANG TRONG CA (Mở Check-out sau {punchState?.remainingMinutesToCheckout ?? 30} phút)
+                      </>
+                    ) : isCheckout ? (
+                      <>
+                        <CheckCircle2 size={22} />
+                        CHẤM CÔNG RA VỀ (CHECK-OUT)
+                      </>
+                    ) : (
+                      <>
+                        <Clock size={22} />
+                        CHẤM CÔNG VÀO LÀM (CHECK-IN)
+                      </>
+                    )}
                   </button>
                 )}
               </div>
@@ -1016,62 +997,64 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
               Chưa có dữ liệu chấm công nào trong khoảng thời gian này.
             </div>
           ) : (
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-                <thead>
-                  <tr style={{ backgroundColor: '#F8FAFC', borderBottom: '1px solid #E2E8F0', textAlign: 'left', color: '#475569' }}>
-                    <th style={{ padding: '12px 14px' }}>Ngày làm việc</th>
-                    <th style={{ padding: '12px 14px' }}>Giờ vào (Check-in)</th>
-                    <th style={{ padding: '12px 14px' }}>Giờ ra (Check-out)</th>
-                    <th style={{ padding: '12px 14px' }}>Hình thức</th>
-                    <th style={{ padding: '12px 14px' }}>Trạng thái</th>
-                    <th style={{ padding: '12px 14px', textAlign: 'right' }}>Chi tiết lượt bấm</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {attendanceHistory.map((item, idx) => (
-                    <tr key={item.workDate || idx} style={{ borderBottom: '1px solid #F1F5F9' }}>
-                      <td style={{ padding: '12px 14px', fontWeight: 700, color: '#0F172A' }}>
-                        {item.workDate}
-                      </td>
-                      <td style={{ padding: '12px 14px', fontWeight: 700, color: item.inTime ? '#16A34A' : '#94A3B8' }}>
-                        {item.inTime || '—'}
-                      </td>
-                      <td style={{ padding: '12px 14px', fontWeight: 700, color: item.outTime ? '#0056B3' : '#94A3B8' }}>
-                        {item.outTime || '—'}
-                      </td>
-                      <td style={{ padding: '12px 14px' }}>
-                        <span style={{
-                          backgroundColor: '#F1F5F9',
-                          color: '#475569',
-                          padding: '3px 8px',
-                          borderRadius: '6px',
-                          fontSize: '11px',
-                          fontWeight: 700
-                        }}>
-                          {item.source || 'PC / APP'}
-                        </span>
-                      </td>
-                      <td style={{ padding: '12px 14px' }}>
-                        <span style={{
-                          backgroundColor: item.hasPendingReview ? '#FEF3C7' : '#DCFCE7',
-                          color: item.hasPendingReview ? '#92400E' : '#166534',
-                          padding: '3px 8px',
-                          borderRadius: '6px',
-                          fontSize: '11px',
-                          fontWeight: 700
-                        }}>
-                          {item.hasPendingReview ? 'Chờ duyệt' : 'Hợp lệ'}
-                        </span>
-                      </td>
-                      <td style={{ padding: '12px 14px', textAlign: 'right', color: '#64748B', fontSize: '12px' }}>
-                        {item.punches?.length || 0} lượt quẹt
-                      </td>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#F8FAFC', borderBottom: '1px solid #E2E8F0', textAlign: 'left', color: '#475569' }}>
+                      <th style={{ padding: '12px 14px', minWidth: '130px', whiteSpace: 'nowrap' }}>Ngày làm việc</th>
+                      <th style={{ padding: '12px 14px', minWidth: '160px', whiteSpace: 'nowrap' }}>Giờ vào (Check-in)</th>
+                      <th style={{ padding: '12px 14px', minWidth: '160px', whiteSpace: 'nowrap' }}>Giờ ra (Check-out)</th>
+                      <th style={{ padding: '12px 14px', minWidth: '110px', whiteSpace: 'nowrap' }}>Hình thức</th>
+                      <th style={{ padding: '12px 14px', minWidth: '110px', whiteSpace: 'nowrap' }}>Trạng thái</th>
+                      <th style={{ padding: '12px 14px', minWidth: '140px', textAlign: 'right', whiteSpace: 'nowrap' }}>Chi tiết lượt bấm</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {attendanceHistory.map((item, idx) => (
+                      <tr key={item.workDate || idx} style={{ borderBottom: '1px solid #F1F5F9' }}>
+                        <td style={{ padding: '12px 14px', fontWeight: 700, color: '#0F172A', whiteSpace: 'nowrap' }}>
+                          {item.workDate}
+                        </td>
+                        <td style={{ padding: '12px 14px', fontWeight: 700, color: item.inTime ? '#16A34A' : '#94A3B8', whiteSpace: 'nowrap' }}>
+                          {item.inTime || '—'}
+                        </td>
+                        <td style={{ padding: '12px 14px', fontWeight: 700, color: item.outTime ? '#0056B3' : '#94A3B8', whiteSpace: 'nowrap' }}>
+                          {item.outTime || '—'}
+                        </td>
+                        <td style={{ padding: '12px 14px', whiteSpace: 'nowrap' }}>
+                          <span style={{
+                            backgroundColor: '#F1F5F9',
+                            color: '#475569',
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            fontSize: '11px',
+                            fontWeight: 700,
+                            whiteSpace: 'nowrap'
+                          }}>
+                            {item.source || 'PC / APP'}
+                          </span>
+                        </td>
+                        <td style={{ padding: '12px 14px', whiteSpace: 'nowrap' }}>
+                          <span style={{
+                            backgroundColor: item.hasPendingReview ? '#FEF3C7' : '#DCFCE7',
+                            color: item.hasPendingReview ? '#92400E' : '#166534',
+                            padding: '3px 8px',
+                            borderRadius: '6px',
+                            fontSize: '11px',
+                            fontWeight: 700,
+                            whiteSpace: 'nowrap'
+                          }}>
+                            {item.hasPendingReview ? 'Chờ duyệt' : 'Hợp lệ'}
+                          </span>
+                        </td>
+                        <td style={{ padding: '12px 14px', textAlign: 'right', color: '#64748B', fontSize: '12px', whiteSpace: 'nowrap' }}>
+                          {item.punches?.length || 0} lượt quẹt
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
           )}
         </div>
       )}
@@ -1122,7 +1105,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 }}
               >
                 <Plus size={16} />
-                + Tạo đơn nghỉ phép
+                Tạo đơn nghỉ phép
               </button>
 
               <button
@@ -1143,7 +1126,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 }}
               >
                 <FileText size={16} />
-                + Giải trình chấm công
+                Giải trình chấm công
               </button>
             </div>
           </div>
@@ -1169,55 +1152,57 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                   <thead>
                     <tr style={{ backgroundColor: '#F8FAFC', borderBottom: '1px solid #E2E8F0', textAlign: 'left', color: '#475569' }}>
-                      <th style={{ padding: '10px 14px' }}>Mã đơn</th>
-                      <th style={{ padding: '10px 14px' }}>Loại đơn</th>
-                      <th style={{ padding: '10px 14px' }}>Thời gian</th>
-                      <th style={{ padding: '10px 14px' }}>Số ngày / Giờ</th>
-                      <th style={{ padding: '10px 14px' }}>Lý do</th>
-                      <th style={{ padding: '10px 14px' }}>Trạng thái</th>
-                      <th style={{ padding: '10px 14px' }}>Phản hồi HCNS</th>
+                      <th style={{ padding: '10px 14px', minWidth: '85px', whiteSpace: 'nowrap' }}>Mã đơn</th>
+                      <th style={{ padding: '10px 14px', minWidth: '130px', whiteSpace: 'nowrap' }}>Loại đơn</th>
+                      <th style={{ padding: '10px 14px', minWidth: '170px', whiteSpace: 'nowrap' }}>Thời gian</th>
+                      <th style={{ padding: '10px 14px', minWidth: '120px', whiteSpace: 'nowrap' }}>Số ngày / Giờ</th>
+                      <th style={{ padding: '10px 14px', minWidth: '220px', whiteSpace: 'nowrap' }}>Lý do</th>
+                      <th style={{ padding: '10px 14px', minWidth: '120px', whiteSpace: 'nowrap' }}>Trạng thái</th>
+                      <th style={{ padding: '10px 14px', minWidth: '180px', whiteSpace: 'nowrap' }}>Phản hồi HCNS</th>
                     </tr>
                   </thead>
                   <tbody>
                     {myRequests.map((req) => (
                       <tr key={req.requestId} style={{ borderBottom: '1px solid #F1F5F9' }}>
-                        <td style={{ padding: '10px 14px', fontWeight: 700, color: '#0056B3' }}>
+                        <td style={{ padding: '10px 14px', fontWeight: 700, color: '#0056B3', whiteSpace: 'nowrap' }}>
                           #{req.requestId}
                         </td>
-                        <td style={{ padding: '10px 14px' }}>
+                        <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
                           <span style={{
                             backgroundColor: req.requestType === 'LEAVE' ? '#EFF6FF' : '#F0FDF4',
                             color: req.requestType === 'LEAVE' ? '#0056B3' : '#166534',
                             padding: '3px 8px',
                             borderRadius: '6px',
                             fontSize: '11px',
-                            fontWeight: 700
+                            fontWeight: 700,
+                            whiteSpace: 'nowrap'
                           }}>
                             {req.requestType === 'LEAVE' ? 'Nghỉ phép' : 'Giải trình công'}
                           </span>
                         </td>
-                        <td style={{ padding: '10px 14px', fontWeight: 600 }}>
+                        <td style={{ padding: '10px 14px', fontWeight: 600, whiteSpace: 'nowrap' }}>
                           {req.fromDate} {req.toDate && req.toDate !== req.fromDate ? `→ ${req.toDate}` : ''}
                         </td>
-                        <td style={{ padding: '10px 14px', fontWeight: 700, color: '#D97706' }}>
+                        <td style={{ padding: '10px 14px', fontWeight: 700, color: '#D97706', whiteSpace: 'nowrap' }}>
                           {req.daysRequested ? `${req.daysRequested} ngày` : `${req.actualTimeIn || ''} - ${req.actualTimeOut || ''}`}
                         </td>
-                        <td style={{ padding: '10px 14px', color: '#475569', maxWidth: '240px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <td style={{ padding: '10px 14px', color: '#475569', maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {req.reason}
                         </td>
-                        <td style={{ padding: '10px 14px' }}>
+                        <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
                           <span style={{
                             backgroundColor: req.status === 'APPROVED' ? '#DCFCE7' : req.status === 'PENDING_HR' ? '#FEF3C7' : '#FEE2E2',
                             color: req.status === 'APPROVED' ? '#166534' : req.status === 'PENDING_HR' ? '#92400E' : '#991B1B',
                             padding: '3px 8px',
                             borderRadius: '6px',
                             fontSize: '11px',
-                            fontWeight: 700
+                            fontWeight: 700,
+                            whiteSpace: 'nowrap'
                           }}>
                             {req.status === 'APPROVED' ? 'Đã duyệt' : req.status === 'PENDING_HR' ? 'Chờ duyệt' : 'Từ chối'}
                           </span>
                         </td>
-                        <td style={{ padding: '10px 14px', color: '#64748B', fontSize: '12px' }}>
+                        <td style={{ padding: '10px 14px', color: '#64748B', fontSize: '12px', whiteSpace: 'nowrap' }}>
                           {req.hrNote || '—'}
                         </td>
                       </tr>
@@ -1242,12 +1227,32 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
             padding: '24px',
             boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
           }}>
-            <h2 style={{ fontSize: '16px', fontWeight: 800, color: '#0F172A', marginBottom: '8px' }}>
-              THÔNG TIN THIẾT BỊ MÁY TÍNH (PC)
-            </h2>
-            <p style={{ fontSize: '13px', color: '#64748B', marginBottom: '20px' }}>
-              Hệ thống Superbrain sử dụng địa chỉ MAC Address để định danh máy tính của nhân viên. Khi điểm danh trên PC, bạn chỉ cần mở trình duyệt và bấm nút điểm danh.
-            </p>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px', flexWrap: 'wrap', gap: '8px' }}>
+              <div>
+                <h2 style={{ fontSize: '16px', fontWeight: 800, color: '#0F172A', margin: 0 }}>
+                  THIẾT BỊ ĐIỂM DANH & ĐỊA CHỈ MAC
+                </h2>
+                <div style={{ fontSize: '12px', color: '#64748B', marginTop: '2px' }}>
+                  Định danh máy tính (PC) hoặc điện thoại (Mobile) dùng để xác thực lượt chấm công chính chủ.
+                </div>
+              </div>
+              <div style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '6px 12px',
+                borderRadius: '8px',
+                backgroundColor: '#F8FAFC',
+                border: '1px solid #E2E8F0',
+                fontSize: '12px',
+                fontWeight: 700,
+                color: '#334155',
+                whiteSpace: 'nowrap'
+              }}>
+                {isCurrentClientMobile ? <Smartphone size={15} color="#0056B3" /> : <Monitor size={15} color="#0056B3" />}
+                <span>Đang truy cập: <b>{isCurrentClientMobile ? 'Điện thoại Mobile' : 'Máy tính PC'}</b></span>
+              </div>
+            </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px', marginBottom: '24px' }}>
               {/* Thẻ PC */}
@@ -1260,7 +1265,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 800, fontSize: '14px', color: '#0056B3' }}>
                     <Monitor size={18} />
-                    KHE THIẾT BỊ 1: MÁY TÍNH (PC)
+                    THIẾT BỊ 1: MÁY TÍNH (PC)
                   </div>
                   {isMacRegistered ? (
                     isMacMatch ? (
@@ -1272,7 +1277,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                         fontSize: '11px',
                         fontWeight: 700
                       }}>
-                        Đang hoạt động (Khớp máy)
+                        Đang hoạt động
                       </span>
                     ) : (
                       <span style={{
@@ -1330,7 +1335,25 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 </div>
 
                 <div style={{ marginTop: '16px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  {!isMacRegistered ? (
+                  {isCurrentClientMobile ? (
+                    /* Khi truy cập từ Mobile: PC CHỈ HIỂN THỊ TRẠNG THÁI, KHÓA NÚT ĐĂNG KÝ TRÁNH NHẦM */
+                    <div style={{
+                      backgroundColor: '#FEF3C7',
+                      border: '1px solid #FDE68A',
+                      borderRadius: '8px',
+                      padding: '10px 14px',
+                      fontSize: '12px',
+                      color: '#92400E',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px'
+                    }}>
+                      <Lock size={16} color="#D97706" />
+                      <span>
+                        🔒 <strong>Đã khóa đăng ký PC:</strong> Bạn đang truy cập từ Điện thoại. Vui lòng mở máy tính làm việc để thực hiện đăng ký MAC PC, tránh gán nhầm mã di động.
+                      </span>
+                    </div>
+                  ) : !isMacRegistered ? (
                     <button
                       type="button"
                       onClick={handleRegisterMac}
@@ -1352,7 +1375,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                       }}
                     >
                       {registeringMac ? <RefreshCw size={16} className="spin" /> : <ShieldCheck size={16} />}
-                      {registeringMac ? 'Đang lưu MAC Address...' : '👉 Đăng Ký MAC Address Cho Máy Tính Này'}
+                      {registeringMac ? 'Đang lưu MAC Address...' : 'Đăng Ký MAC Address Cho Máy Tính Này'}
                     </button>
                   ) : (
                     <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
@@ -1405,7 +1428,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 800, fontSize: '14px', color: '#475569' }}>
                     <Smartphone size={18} />
-                    KHE THIẾT BỊ 2: DI ĐỘNG (MOBILE)
+                    THIẾT BỊ 2: DI ĐỘNG (MOBILE)
                   </div>
                   <span style={{
                     backgroundColor: myDevices.mobile ? '#DCFCE7' : '#F1F5F9',
@@ -1434,53 +1457,49 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                   </div>
                 </div>
 
-                {onSwitchToMobile && (
-                  <div style={{ marginTop: '16px' }}>
+                <div style={{ marginTop: '16px' }}>
+                  {!myDevices.mobile ? (
+                    /* Khi truy cập từ Mobile và chưa đăng ký: Cho phép đăng ký trực tiếp */
                     <button
                       type="button"
-                      onClick={onSwitchToMobile}
+                      onClick={handleRegisterMobile}
+                      disabled={registeringMobile}
                       style={{
                         width: '100%',
-                        backgroundColor: '#FFFFFF',
-                        border: '1px solid #CBD5E1',
+                        backgroundColor: '#0056B3',
+                        color: '#FFFFFF',
+                        border: 'none',
                         borderRadius: '8px',
-                        padding: '8px 12px',
-                        fontSize: '12px',
-                        fontWeight: 700,
-                        color: '#475569',
-                        cursor: 'pointer',
+                        padding: '12px 18px',
+                        fontSize: '13px',
+                        fontWeight: 800,
+                        cursor: registeringMobile ? 'not-allowed' : 'pointer',
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        gap: '6px'
+                        gap: '8px',
+                        boxShadow: '0 2px 6px rgba(0, 86, 179, 0.25)'
                       }}
                     >
-                      <Smartphone size={14} />
-                      Mở giao diện Mobile
+                      {registeringMobile ? <RefreshCw size={16} className="spin" /> : <ShieldCheck size={16} />}
+                      {registeringMobile ? 'Đang lưu thiết bị di động...' : 'Đăng Ký Thiết Bị Di Động Này'}
                     </button>
-                  </div>
-                )}
+                  ) : (
+                    <div style={{
+                      backgroundColor: '#DCFCE7',
+                      color: '#166534',
+                      padding: '8px 12px',
+                      borderRadius: '8px',
+                      fontSize: '12px',
+                      fontWeight: 700,
+                      border: '1px solid #BBF7D0',
+                      textAlign: 'center'
+                    }}>
+                      🔒 Thiết bị di động đã được liên kết chính chủ
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-
-            {/* Hướng dẫn xem địa chỉ MAC trên máy tính */}
-            <div style={{
-              backgroundColor: '#EFF6FF',
-              border: '1px solid #BFDBFE',
-              borderRadius: '12px',
-              padding: '16px 20px',
-              fontSize: '13px',
-              color: '#1E3A8A'
-            }}>
-              <div style={{ fontWeight: 800, fontSize: '14px', marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <HelpCircle size={16} />
-                Hướng dẫn tra cứu địa chỉ MAC trên máy tính Windows / Mac:
-              </div>
-              <ul style={{ margin: 0, paddingLeft: '20px', lineHeight: 1.6 }}>
-                <li><b>Trên Windows:</b> Bấm phím <code>Windows + R</code>, gõ <code>cmd</code> rồi Enter. Trong cửa sổ đen, gõ lệnh <code>getmac</code> hoặc <code>ipconfig /all</code> để xem <b>Physical Address</b> (dạng: <code>00-15-5D-...</code> hoặc <code>00:15:5D:...</code>).</li>
-                <li><b>Trên macOS:</b> Mở <b>System Settings</b> → <b>Network</b> → chọn Wi-Fi hoặc Ethernet → bấm <b>Details</b> → <b>Hardware</b> → xem <b>MAC Address</b>.</li>
-                <li>Nếu công ty quản lý MAC cố định theo danh sách IT, bạn bấm nút <b>"Chỉnh sửa / Nhập MAC"</b> ở trên để nhập đúng địa chỉ MAC vật lý của máy.</li>
-              </ul>
             </div>
           </div>
         </div>

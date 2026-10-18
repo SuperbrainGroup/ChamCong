@@ -10,7 +10,7 @@ namespace ChamCong.Api.Controllers;
 
 [ApiController]
 [Route("api/audit-logs")]
-[Authorize]
+[Authorize(Policy = "RequireAdmin")]
 public class AuditLogsController : ControllerBase
 {
     private readonly AccessService _access;

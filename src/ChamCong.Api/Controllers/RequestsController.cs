@@ -30,11 +30,20 @@ public class RequestsController : ControllerBase
     public async Task<IActionResult> SubmitRequest([FromForm] SubmitRequestForm form, CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode))
         {
             return BadRequest(new { code = "NO_EMPLOYEE", message = "Tài khoản chưa liên kết nhân viên." });
         }
+
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
+        if (primaryCompanyId.HasValue)
+        {
+            empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
+        }
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
+        int? companyId = emp?.CompanyId ?? primaryCompanyId;
 
         if (form.RequestType?.Equals("LEAVE", StringComparison.OrdinalIgnoreCase) == true)
         {
@@ -47,7 +56,7 @@ public class RequestsController : ControllerBase
                 Reason = form.Reason ?? "",
                 Files = form.Files
             };
-            var req = await _requestService.SubmitLeaveRequestAsync(user.EmployeeCode, dto, ct);
+            var req = await _requestService.SubmitLeaveRequestAsync(user.EmployeeCode, dto, companyId, ct);
             _audit.Log("Request", req.RequestId, "SubmitLeave", form.Reason);
             return Ok(new { req.RequestId, message = "Đã gửi đơn nghỉ phép thành công." });
         }
@@ -67,7 +76,7 @@ public class RequestsController : ControllerBase
                 Reason = form.Reason ?? "",
                 Files = form.Files
             };
-            var req = await _requestService.SubmitRegularizationRequestAsync(user.EmployeeCode, dto, ct);
+            var req = await _requestService.SubmitRegularizationRequestAsync(user.EmployeeCode, dto, companyId, ct);
             _audit.Log("Request", req.RequestId, "SubmitRegularization", form.Reason);
             return Ok(new { req.RequestId, message = "Đã gửi giải trình chấm công thành công." });
         }
@@ -80,13 +89,20 @@ public class RequestsController : ControllerBase
     public async Task<IActionResult> GetMyRequests([FromQuery] string? status, CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode)) return Ok(new List<object>());
+
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
 
         var q = _db.EmployeeRequests
             .Include(r => r.Attachments)
             .AsNoTracking()
             .Where(r => r.EmployeeCode == user.EmployeeCode);
+
+        if (primaryCompanyId.HasValue)
+        {
+            q = q.Where(r => r.CompanyId == primaryCompanyId.Value || r.CompanyId == null);
+        }
 
         if (!string.IsNullOrWhiteSpace(status))
         {
@@ -193,7 +209,7 @@ public class SubmitRequestForm
 }
 
 [ApiController]
-[Authorize]
+[Authorize(Policy = "RequireHR")]
 [Route("api/v1/hr/requests")]
 [Route("api/hr/requests")]
 public class HrRequestsController : ControllerBase
@@ -217,27 +233,31 @@ public class HrRequestsController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetRequests([FromQuery] string? status, [FromQuery] string? branch, CancellationToken ct)
     {
-        if (!User.IsHR()) return StatusCode(403, new { message = "Bạn không có quyền HCNS." });
-
         var q = _db.EmployeeRequests
             .Include(r => r.Attachments)
             .AsNoTracking();
 
+        Company? branchComp = null;
         if (!string.IsNullOrWhiteSpace(branch))
         {
             await _access.EnsureBranchAsync(branch, ct);
-            var branchComp = await _db.Companies.AsNoTracking().FirstOrDefaultAsync(c => c.Code == branch, ct);
-            var empInBranch = await _db.Employees.AsNoTracking().Where(e => branchComp != null && e.CompanyId == branchComp.Id).Select(e => e.EmployeeCode).ToListAsync(ct);
-            var assignedInBranch = await _db.EmployeeBranchAssignments.AsNoTracking().Where(a => a.BranchCode == branch && (a.ToDate == null || a.ToDate >= DateTime.Today)).Select(a => a.EmployeeCode).ToListAsync(ct);
-            var targetEmpCodes = empInBranch.Concat(assignedInBranch).Distinct().ToList();
-            q = q.Where(d => targetEmpCodes.Contains(d.EmployeeCode));
+            branchComp = await _db.Companies.AsNoTracking().FirstOrDefaultAsync(c => c.Code == branch, ct);
+            if (branchComp != null)
+            {
+                var empInBranch = await _db.Employees.AsNoTracking().Where(e => e.CompanyId == branchComp.Id).Select(e => e.EmployeeCode).ToListAsync(ct);
+                var assignedInBranch = await _db.EmployeeBranchAssignments.AsNoTracking().Where(a => a.BranchCode == branch && (a.ToDate == null || a.ToDate >= DateTime.Today)).Select(a => a.EmployeeCode).ToListAsync(ct);
+                var targetEmpCodes = empInBranch.Concat(assignedInBranch).Distinct().ToList();
+                q = q.Where(d => d.CompanyId == branchComp.Id || (d.CompanyId == null && targetEmpCodes.Contains(d.EmployeeCode)));
+            }
         }
         else
         {
-            var allowedEmpCodes = await _access.AllowedEmployeeCodesAsync(ct);
-            if (allowedEmpCodes != null)
+            var allowedCodes = await _access.AllowedBranchCodesAsync(ct);
+            if (allowedCodes != null)
             {
-                q = q.Where(d => allowedEmpCodes.Contains(d.EmployeeCode));
+                var allowedCompIds = await _db.Companies.AsNoTracking().Where(c => allowedCodes.Contains(c.Code)).Select(c => c.Id).ToListAsync(ct);
+                var allowedEmpCodes = await _access.AllowedEmployeeCodesAsync(ct);
+                q = q.Where(d => (d.CompanyId != null && allowedCompIds.Contains(d.CompanyId.Value)) || (allowedEmpCodes != null && allowedEmpCodes.Contains(d.EmployeeCode)));
             }
         }
 
@@ -247,24 +267,62 @@ public class HrRequestsController : ControllerBase
         }
 
         var list = await q.OrderByDescending(r => r.CreatedAtUtc).Take(200).ToListAsync(ct);
-        var result = list.Select(r => new
+        var empCodes = list.Select(r => r.EmployeeCode).Distinct().ToList();
+        var compIds = list.Select(r => r.CompanyId).Where(c => c.HasValue).Select(c => c!.Value).Distinct().ToList();
+        var empQuery = _db.Employees.AsNoTracking().Where(e => empCodes.Contains(e.EmployeeCode));
+        if (compIds.Any())
         {
-            r.RequestId,
-            r.RequestType,
-            r.EmployeeCode,
-            r.LeaveCode,
-            fromDate = r.FromDate.ToString("yyyy-MM-dd"),
-            toDate = r.ToDate.ToString("yyyy-MM-dd"),
-            r.DayPart,
-            r.DaysRequested,
-            r.ReasonCode,
-            r.Reason,
-            actualTimeIn = r.ActualTimeIn?.ToString(@"hh\:mm"),
-            actualTimeOut = r.ActualTimeOut?.ToString(@"hh\:mm"),
-            r.Status,
-            r.HRNote,
-            createdAt = r.CreatedAtUtc,
-            attachmentCount = r.Attachments.Count
+            empQuery = empQuery.Where(e => compIds.Contains(e.CompanyId));
+        }
+
+        var empList = await empQuery
+            .Select(e => new { e.EmployeeCode, e.FullName, e.DepartmentId, e.CompanyId })
+            .ToListAsync(ct);
+
+        var empDict = empList
+            .GroupBy(e => $"{e.CompanyId}_{e.EmployeeCode}", StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        var deptIds = empList.Where(e => e.DepartmentId.HasValue).Select(e => e.DepartmentId!.Value).Distinct().ToList();
+        var deptList = await _db.Departments.AsNoTracking()
+            .Where(d => deptIds.Contains(d.Id))
+            .Select(d => new { d.Id, d.Name })
+            .ToListAsync(ct);
+        var deptDict = deptList
+            .GroupBy(d => d.Id)
+            .ToDictionary(g => g.Key, g => g.First().Name);
+
+        var result = list.Select(r =>
+        {
+            string empKey = r.CompanyId.HasValue ? $"{r.CompanyId}_{r.EmployeeCode}" : r.EmployeeCode;
+            if (!empDict.TryGetValue(empKey, out var empInfo))
+            {
+                empInfo = empList.FirstOrDefault(e => string.Equals(e.EmployeeCode, r.EmployeeCode, StringComparison.OrdinalIgnoreCase));
+            }
+            string? deptName = null;
+            if (empInfo?.DepartmentId != null) deptDict.TryGetValue(empInfo.DepartmentId.Value, out deptName);
+
+            return new
+            {
+                r.RequestId,
+                r.RequestType,
+                r.EmployeeCode,
+                fullName = empInfo?.FullName ?? r.EmployeeCode,
+                departmentName = deptName ?? "",
+                r.LeaveCode,
+                fromDate = r.FromDate.ToString("yyyy-MM-dd"),
+                toDate = r.ToDate.ToString("yyyy-MM-dd"),
+                r.DayPart,
+                r.DaysRequested,
+                r.ReasonCode,
+                r.Reason,
+                actualTimeIn = r.ActualTimeIn?.ToString(@"hh\:mm"),
+                actualTimeOut = r.ActualTimeOut?.ToString(@"hh\:mm"),
+                r.Status,
+                r.HRNote,
+                createdAt = r.CreatedAtUtc,
+                attachmentCount = r.Attachments.Count
+            };
         });
 
         return Ok(result);
@@ -279,7 +337,7 @@ public class HrRequestsController : ControllerBase
         var reqTarget = await _db.EmployeeRequests.AsNoTracking().FirstOrDefaultAsync(r => r.RequestId == id, ct);
         if (reqTarget == null) return NotFound(new { message = "Không tìm thấy đơn." });
 
-        await _access.EnsureEmployeeCodeAsync(reqTarget.EmployeeCode, ct);
+        await _access.EnsureEmployeeCodeAsync(reqTarget.EmployeeCode, reqTarget.CompanyId, ct);
 
         bool approve = dto.Action?.Equals("APPROVE", StringComparison.OrdinalIgnoreCase) == true;
         var req = await _requestService.DecideRequestAsync(id, approve, dto.Note, User.UserId(), ct);
@@ -326,7 +384,7 @@ public class AttachmentsController : ControllerBase
             {
                 return StatusCode(403, new { message = "Bạn không có quyền xem tệp đính kèm này." });
             }
-            await _access.EnsureEmployeeCodeAsync(req.EmployeeCode, ct);
+            await _access.EnsureEmployeeCodeAsync(req.EmployeeCode, req.CompanyId, ct);
         }
 
         var basePath = _config["Storage:EvidencePath"] ?? Path.Combine(AppContext.BaseDirectory, "Storage", "Evidence");

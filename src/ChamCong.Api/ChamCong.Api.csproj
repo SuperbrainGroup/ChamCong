@@ -12,10 +12,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="Data\schema.sql">
+    <EmbeddedResource Include="Data\schema.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </None>
+    </EmbeddedResource>
   </ItemGroup>
 
   <PropertyGroup>

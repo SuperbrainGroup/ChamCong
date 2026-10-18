@@ -14,8 +14,10 @@ frontend/dist/
 frontend/dist-ssr/
 src/ChamCong.Api/wwwroot/
 
-# Deployment build package
+# Deployment & publish build packages
 deploy/
+publish/
+wwwroot/
 
 # Logs
 logs/
@@ -28,6 +30,7 @@ pnpm-debug.log*
 # OS & IDE
 .idea/
 .vscode/
+.gemini/
 .DS_Store
 Thumbs.db
 .codegraph/

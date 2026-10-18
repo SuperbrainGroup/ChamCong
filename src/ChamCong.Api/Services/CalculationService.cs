@@ -54,22 +54,28 @@ public class CalculationService : ICalculationService
             .Where(c => c.CompanyId == period.CompanyId)
             .ToListAsync(ct);
 
-        var codesMap = codesList.ToDictionary(c => c.Code, c => new CodeDef
-        {
-            Code = c.Code,
-            Name = c.Name,
-            WorkValue = c.WorkValue,
-            HolidayValue = c.HolidayValue,
-            AnnualLeaveValue = c.AnnualLeaveValue,
-            PaidLeaveValue = c.PaidLeaveValue,
-            FundType = (FundType)c.FundType,
-            FundDeduct = c.FundDeduct,
-            IsHalfLeave = c.IsHalfLeave,
-            Color = c.Color,
-            SortOrder = c.SortOrder,
-            IsSystem = c.IsSystem,
-            Condition = c.Condition
-        });
+        var codesMap = codesList
+            .GroupBy(c => c.Code, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g =>
+            {
+                var c = g.First();
+                return new CodeDef
+                {
+                    Code = c.Code,
+                    Name = c.Name,
+                    WorkValue = c.WorkValue,
+                    HolidayValue = c.HolidayValue,
+                    AnnualLeaveValue = c.AnnualLeaveValue,
+                    PaidLeaveValue = c.PaidLeaveValue,
+                    FundType = (FundType)c.FundType,
+                    FundDeduct = c.FundDeduct,
+                    IsHalfLeave = c.IsHalfLeave,
+                    Color = c.Color,
+                    SortOrder = c.SortOrder,
+                    IsSystem = c.IsSystem,
+                    Condition = c.Condition
+                };
+            }, StringComparer.OrdinalIgnoreCase);
 
         // 2. Tải tham số hiệu lực
         var paramValues = await _db.ParameterValues
@@ -134,13 +140,7 @@ public class CalculationService : ICalculationService
             period.StandardDays = SummaryCalculator.StandardDays(calendarDays.Values);
         }
 
-        // 4. Tải danh sách nhân viên
-        var employees = await _db.Employees
-            .AsNoTracking()
-            .Where(e => e.CompanyId == period.CompanyId)
-            .ToListAsync(ct);
-
-        // 5. Tải dữ liệu quẹt thô mới nhất của kỳ
+        // 4. Tải dữ liệu quẹt thô mới nhất của kỳ
         var punches = await _db.RawPunches
             .AsNoTracking()
             .Where(p => p.PeriodId == period.Id && p.EmployeeId != null)
@@ -149,6 +149,21 @@ public class CalculationService : ICalculationService
         var punchMap = punches
             .GroupBy(p => (p.EmployeeId!.Value, p.WorkDate.Date))
             .ToDictionary(g => g.Key, g => g.First());
+
+        var empWithPunches = punches.Where(p => p.EmployeeId != null).Select(p => p.EmployeeId!.Value).ToHashSet();
+
+        // 5. Tải danh sách nhân viên thuộc kỳ công:
+        // Tự động loại bỏ nhân sự đã nghỉ việc trước kỳ công (trừ khi có quẹt công)
+        // và nhân sự vào làm sau kỳ công để BCC luôn gọn gàng
+        var allEmployees = await _db.Employees
+            .AsNoTracking()
+            .Where(e => e.CompanyId == period.CompanyId)
+            .ToListAsync(ct);
+
+        var employees = allEmployees.Where(e =>
+            (e.EndDate == null || e.EndDate.Value.Date >= period.FromDate.Date || empWithPunches.Contains(e.Id)) &&
+            (e.StartDate.Date <= period.ToDate.Date || empWithPunches.Contains(e.Id))
+        ).ToList();
 
         // 6. Tải đơn ngoại lệ nghỉ phép
         var leaves = await _db.LeaveRequests
@@ -165,8 +180,32 @@ public class CalculationService : ICalculationService
             .Where(r => r.PeriodId == period.Id)
             .ToListAsync(ct);
 
+        var manualList = oldResults.Where(r => r.IsManual).ToList();
+        if (resetManual && manualList.Any())
+        {
+            // Tự động tạo bản sao lưu trước khi xóa để người dùng có thể Hoàn tác bất kỳ lúc nào nếu thao tác nhầm
+            var oldBackups = await _db.DayResultManualBackups
+                .Where(b => b.PeriodId == period.Id)
+                .ToListAsync(ct);
+            _db.DayResultManualBackups.RemoveRange(oldBackups);
+
+            var newBackups = manualList.Select(m => new DayResultManualBackup
+            {
+                PeriodId = period.Id,
+                EmployeeId = m.EmployeeId,
+                Date = m.Date,
+                Code = m.Code,
+                PaidValue = m.PaidValue,
+                ManualReason = m.ManualReason,
+                ManualBy = m.ManualBy,
+                ManualAt = m.ManualAt,
+                BackedUpAt = DateTime.UtcNow
+            }).ToList();
+            _db.DayResultManualBackups.AddRange(newBackups);
+        }
+
         var manualMap = resetManual ? new Dictionary<(int, DateTime), DayResult>()
-            : oldResults.Where(r => r.IsManual).ToDictionary(r => (r.EmployeeId, r.Date.Date));
+            : manualList.ToDictionary(r => (r.EmployeeId, r.Date.Date));
 
         // 8. Chạy Engine cho từng nhân viên và ngày
         var newResults = new List<DayResult>();
@@ -269,9 +308,20 @@ public class CalculationService : ICalculationService
             }
         }
 
-        // 9. Lưu DayResults
-        _db.DayResults.RemoveRange(oldResults);
-        _db.DayResults.AddRange(newResults);
+        // 9. Lưu DayResults (tránh xung đột IDENTITY khi giữ các dòng sửa tay)
+        var currentEmpIds = employees.Select(e => e.Id).ToHashSet();
+        if (!resetManual)
+        {
+            var toDelete = oldResults.Where(r => !currentEmpIds.Contains(r.EmployeeId) || !r.IsManual).ToList();
+            _db.DayResults.RemoveRange(toDelete);
+            var toInsert = newResults.Where(r => r.Id == 0).ToList();
+            _db.DayResults.AddRange(toInsert);
+        }
+        else
+        {
+            _db.DayResults.RemoveRange(oldResults);
+            _db.DayResults.AddRange(newResults);
+        }
 
         // 10. Module 5 (Cơ bản): Cập nhật Sổ cái phép cho kỳ này (xóa cả bản ghi tạm PeriodId == null để chống trừ trùng)
         var empIds = employees.Select(e => e.Id).ToList();

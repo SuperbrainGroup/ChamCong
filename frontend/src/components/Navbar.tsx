@@ -22,8 +22,11 @@ import {
   Smartphone,
   ShieldCheck,
   Palette,
-  Monitor
+  Monitor,
+  Bell
 } from 'lucide-react';
+import { notificationsApi } from '../api/client';
+import { AppNotification } from '../types';
 
 interface NavbarProps {
   currentView: string;
@@ -39,16 +42,63 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
   const userMenuRef = useRef<HTMLDivElement>(null);
   const subnavRef = useRef<HTMLElement>(null);
 
-  // Close dropdown when clicking outside
+  // Thông báo hệ thống
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [unreadNotiCount, setUnreadNotiCount] = useState<number>(0);
+  const [showNotiPopover, setShowNotiPopover] = useState(false);
+  const notiMenuRef = useRef<HTMLDivElement>(null);
+
+  const fetchNotifications = async () => {
+    try {
+      const res = await notificationsApi.getMyNotifications();
+      setNotifications(res.notifications || []);
+      setUnreadNotiCount(res.unreadCount || 0);
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, 30000);
+    const handleUpdate = () => fetchNotifications();
+    window.addEventListener('notification-updated', handleUpdate);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('notification-updated', handleUpdate);
+    };
+  }, []);
+
+  const handleReadNotification = async (id: number) => {
+    try {
+      await notificationsApi.markAsRead(id);
+      setNotifications(prev => prev.map(n => n.notificationId === id ? { ...n, isRead: true } : n));
+      setUnreadNotiCount(prev => Math.max(0, prev - 1));
+    } catch {}
+  };
+
+  const handleReadAllNotifications = async () => {
+    try {
+      await notificationsApi.markAllAsRead();
+      setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
+      setUnreadNotiCount(0);
+    } catch {}
+  };
+
+  // Close dropdowns when clicking outside
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (userMenuRef.current && !userMenuRef.current.contains(event.target as Node)) {
         setShowUserMenu(false);
       }
+      if (notiMenuRef.current && !notiMenuRef.current.contains(event.target as Node)) {
+        setShowNotiPopover(false);
+      }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setShowUserMenu(false);
+        setShowNotiPopover(false);
       }
     };
 
@@ -122,11 +172,20 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
     { id: 'ess-devices', label: 'Thiết Bị & Địa Chỉ MAC', icon: ShieldCheck },
   ];
 
-  const activeNavItems = isAdmin
-    ? adminNavItems
-    : user?.role === 'Employee'
-      ? employeeNavItems
-      : hrNavItems;
+  const isEssView = currentView.startsWith('ess-');
+
+  const staffEssNavItems = [
+    { id: user?.role === 'Admin' ? 'admin-dashboard' : 'operator', label: '← Quay lại Quản trị', icon: ChevronLeft },
+    ...employeeNavItems
+  ];
+
+  const activeNavItems = isEssView && user?.role !== 'Employee'
+    ? staffEssNavItems
+    : isAdmin
+      ? adminNavItems
+      : user?.role === 'Employee'
+        ? employeeNavItems
+        : hrNavItems;
 
   return (
     <div style={{ position: 'sticky', top: 0, zIndex: 100, backgroundColor: '#ffffff', boxShadow: '0 1px 3px 0 rgba(0,0,0,0.05)' }}>
@@ -245,6 +304,138 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
               </div>
             </div>
           )}
+
+          {/* NÚT THÔNG BÁO HỆ THỐNG */}
+          <div style={{ position: 'relative' }} ref={notiMenuRef}>
+            <button
+              type="button"
+              onClick={() => setShowNotiPopover(prev => !prev)}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '6px 14px',
+                height: '42px',
+                borderRadius: '10px',
+                border: showNotiPopover || unreadNotiCount > 0 ? '1px solid #BFDBFE' : '1px solid var(--neutral-200)',
+                backgroundColor: showNotiPopover || unreadNotiCount > 0 ? '#EFF6FF' : 'var(--neutral-50)',
+                color: showNotiPopover || unreadNotiCount > 0 ? '#1D4ED8' : 'var(--neutral-700)',
+                cursor: 'pointer',
+                fontWeight: 700,
+                fontSize: '13px',
+                transition: 'all 0.15s ease',
+                boxSizing: 'border-box',
+                whiteSpace: 'nowrap'
+              }}
+              title="Thông báo hệ thống"
+            >
+              <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                <Bell size={18} color={unreadNotiCount > 0 ? '#2563EB' : 'var(--neutral-600)'} />
+                {unreadNotiCount > 0 && (
+                  <span style={{
+                    position: 'absolute',
+                    top: -6,
+                    right: -8,
+                    backgroundColor: '#DC2626',
+                    color: '#FFFFFF',
+                    borderRadius: '9999px',
+                    padding: '1px 5px',
+                    fontSize: '10px',
+                    fontWeight: 800,
+                    lineHeight: 1
+                  }}>
+                    {unreadNotiCount}
+                  </span>
+                )}
+              </div>
+              <span>Thông báo</span>
+            </button>
+
+            {showNotiPopover && (
+              <div style={{
+                position: 'absolute',
+                top: 'calc(100% + 8px)',
+                right: 0,
+                width: '360px',
+                maxHeight: '440px',
+                backgroundColor: '#FFFFFF',
+                borderRadius: '14px',
+                boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
+                border: '1px solid var(--neutral-200)',
+                overflow: 'hidden',
+                zIndex: 120,
+                display: 'flex',
+                flexDirection: 'column',
+                animation: 'fadeIn 0.15s ease-out'
+              }}>
+                <div style={{
+                  padding: '12px 16px',
+                  backgroundColor: 'var(--neutral-50)',
+                  borderBottom: '1px solid var(--neutral-200)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between'
+                }}>
+                  <div style={{ fontWeight: 800, fontSize: '13px', color: 'var(--neutral-900)' }}>
+                    Thông báo hệ thống ({notifications.length})
+                  </div>
+                  {unreadNotiCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleReadAllNotifications}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        color: 'var(--primary)',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        cursor: 'pointer'
+                      }}
+                    >
+                      Đọc tất cả
+                    </button>
+                  )}
+                </div>
+
+                <div style={{ overflowY: 'auto', maxHeight: '360px', padding: '8px' }}>
+                  {notifications.length === 0 ? (
+                    <div style={{ textAlign: 'center', padding: '28px 16px', color: 'var(--neutral-400)', fontSize: '13px' }}>
+                      Chưa có thông báo nào.
+                    </div>
+                  ) : (
+                    notifications.map((n) => (
+                      <div
+                        key={n.notificationId}
+                        onClick={() => handleReadNotification(n.notificationId)}
+                        style={{
+                          padding: '10px 12px',
+                          borderRadius: '8px',
+                          marginBottom: '6px',
+                          backgroundColor: n.isRead ? '#FFFFFF' : '#EFF6FF',
+                          border: `1px solid ${n.isRead ? '#F1F5F9' : '#BFDBFE'}`,
+                          cursor: 'pointer',
+                          transition: 'background-color 0.15s ease'
+                        }}
+                      >
+                        <div style={{ fontWeight: 700, fontSize: '13px', color: '#0F172A', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <span>{n.title}</span>
+                          {!n.isRead && (
+                            <span style={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: '#2563EB', display: 'inline-block' }} />
+                          )}
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#475569', marginTop: '4px', lineHeight: 1.4 }}>
+                          {n.body}
+                        </div>
+                        <div style={{ fontSize: '11px', color: '#94A3B8', marginTop: '4px' }}>
+                          {n.timeLocal || ''}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* USER INFO VÀ POPUP THAO TÁC (ĐỔI MẬT KHẨU / ĐĂNG XUẤT) */}
           <div style={{ position: 'relative' }} ref={userMenuRef}>

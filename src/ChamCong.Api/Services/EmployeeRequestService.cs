@@ -27,11 +27,11 @@ public class CreateRegularizationDto
 
 public interface IEmployeeRequestService
 {
-    Task<EmployeeRequest> SubmitLeaveRequestAsync(string employeeCode, CreateLeaveDto dto, CancellationToken ct = default);
-    Task<EmployeeRequest> SubmitRegularizationRequestAsync(string employeeCode, CreateRegularizationDto dto, CancellationToken ct = default);
+    Task<EmployeeRequest> SubmitLeaveRequestAsync(string employeeCode, CreateLeaveDto dto, int? companyId = null, CancellationToken ct = default);
+    Task<EmployeeRequest> SubmitRegularizationRequestAsync(string employeeCode, CreateRegularizationDto dto, int? companyId = null, CancellationToken ct = default);
     Task<EmployeeRequest> DecideRequestAsync(int requestId, bool approve, string? note, int hrUserId, CancellationToken ct = default);
     Task CancelRequestAsync(int requestId, string employeeCode, CancellationToken ct = default);
-    Task<decimal> GetAvailableLeaveBalanceAsync(string employeeCode, int year, CancellationToken ct = default);
+    Task<decimal> GetAvailableLeaveBalanceAsync(string employeeCode, int year, int? companyId = null, CancellationToken ct = default);
 }
 
 public class EmployeeRequestService : IEmployeeRequestService
@@ -65,9 +65,14 @@ public class EmployeeRequestService : IEmployeeRequestService
         return basePath;
     }
 
-    public async Task<decimal> GetAvailableLeaveBalanceAsync(string employeeCode, int year, CancellationToken ct = default)
+    public async Task<decimal> GetAvailableLeaveBalanceAsync(string employeeCode, int year, int? companyId = null, CancellationToken ct = default)
     {
-        var emp = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.EmployeeCode == employeeCode, ct);
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == employeeCode);
+        if (companyId.HasValue)
+        {
+            empQuery = empQuery.Where(e => e.CompanyId == companyId.Value);
+        }
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
         if (emp == null) return 0m;
 
         // Quỹ phép đầu năm
@@ -84,12 +89,19 @@ public class EmployeeRequestService : IEmployeeRequestService
         decimal ledgerDeducted = ledgerEntries.Sum();
 
         // Đang giữ chỗ cho các đơn xin nghỉ đang PENDING_HR
-        var pendingDays = await _db.EmployeeRequests
+        var pendingQuery = _db.EmployeeRequests
             .AsNoTracking()
             .Where(r => r.EmployeeCode == employeeCode &&
                         r.RequestType == "LEAVE" &&
                         r.Status == "PENDING_HR" &&
-                        r.FromDate.Year == year)
+                        r.FromDate.Year == year);
+
+        if (companyId.HasValue)
+        {
+            pendingQuery = pendingQuery.Where(r => r.CompanyId == companyId.Value || r.CompanyId == null);
+        }
+
+        var pendingDays = await pendingQuery
             .Select(r => r.DaysRequested)
             .ToListAsync(ct);
 
@@ -99,7 +111,7 @@ public class EmployeeRequestService : IEmployeeRequestService
         return Math.Max(0m, available);
     }
 
-    public async Task<EmployeeRequest> SubmitLeaveRequestAsync(string employeeCode, CreateLeaveDto dto, CancellationToken ct = default)
+    public async Task<EmployeeRequest> SubmitLeaveRequestAsync(string employeeCode, CreateLeaveDto dto, int? companyId = null, CancellationToken ct = default)
     {
         if (dto.FromDate > dto.ToDate)
         {
@@ -138,7 +150,7 @@ public class EmployeeRequestService : IEmployeeRequestService
         // Kiểm tra số dư phép nếu là nghỉ phép năm (P)
         if (dto.LeaveCode.StartsWith("P", StringComparison.OrdinalIgnoreCase))
         {
-            var available = await GetAvailableLeaveBalanceAsync(employeeCode, dto.FromDate.Year, ct);
+            var available = await GetAvailableLeaveBalanceAsync(employeeCode, dto.FromDate.Year, companyId, ct);
             if (daysRequested > available)
             {
                 throw AppException.Bad($"Số dư quỹ phép không đủ ({available:0.#} ngày khả dụng, cần {daysRequested:0.#} ngày). Vui lòng chọn nghỉ không lương hoặc điều chỉnh thời gian.");
@@ -146,10 +158,17 @@ public class EmployeeRequestService : IEmployeeRequestService
         }
 
         // Kiểm tra trùng lặp ngày với đơn khác
-        var hasOverlap = await _db.EmployeeRequests.AnyAsync(r =>
+        var overlapQuery = _db.EmployeeRequests.Where(r =>
             r.EmployeeCode == employeeCode &&
             (r.Status == "PENDING_HR" || r.Status == "APPROVED") &&
-            !(r.ToDate < dto.FromDate || r.FromDate > dto.ToDate), ct);
+            !(r.ToDate < dto.FromDate || r.FromDate > dto.ToDate));
+
+        if (companyId.HasValue)
+        {
+            overlapQuery = overlapQuery.Where(r => r.CompanyId == companyId.Value || r.CompanyId == null);
+        }
+
+        var hasOverlap = await overlapQuery.AnyAsync(ct);
 
         if (hasOverlap)
         {
@@ -158,6 +177,7 @@ public class EmployeeRequestService : IEmployeeRequestService
 
         var req = new EmployeeRequest
         {
+            CompanyId = companyId,
             RequestType = "LEAVE",
             EmployeeCode = employeeCode,
             LeaveCode = dto.LeaveCode,
@@ -180,10 +200,65 @@ public class EmployeeRequestService : IEmployeeRequestService
             await SaveAttachmentsAsync(req.RequestId, dto.Files, ct);
         }
 
+        // Tạo thông báo cho nhân viên nộp đơn
+        var userQuery = _db.Users.Where(u =>
+            (u.EmployeeCode != null && u.EmployeeCode.ToLower() == employeeCode.ToLower()) ||
+            u.Username.ToLower() == employeeCode.ToLower());
+
+        if (companyId.HasValue)
+        {
+            userQuery = userQuery.Where(u => u.Companies.Any(c => c.CompanyId == companyId.Value));
+        }
+
+        var user = await userQuery.FirstOrDefaultAsync(ct);
+
+        if (user != null)
+        {
+            var dateStr = dto.FromDate == dto.ToDate
+                ? dto.FromDate.ToString("dd/MM/yyyy")
+                : $"{dto.FromDate:dd/MM/yyyy} đến {dto.ToDate:dd/MM/yyyy}";
+            _db.Notifications.Add(new Notification
+            {
+                UserId = user.Id,
+                Title = "Đơn nghỉ phép đang chờ duyệt",
+                Body = $"Đơn xin nghỉ phép ({daysRequested:0.#} ngày: {dateStr}) của bạn đã được gửi thành công và đang chờ HCNS phê duyệt.",
+                LinkType = "LEAVE",
+                LinkId = req.RequestId,
+                IsRead = false,
+                CreatedAtUtc = DateTime.UtcNow
+            });
+        }
+
+        // Tạo thông báo cho HCNS / Quản lý của chi nhánh/hội sở
+        var hrQuery = _db.Users.Where(u => u.Role == "HR" || u.Role == "Admin");
+        if (companyId.HasValue)
+        {
+            hrQuery = hrQuery.Where(u => u.Role == "Admin" || u.Companies.Any(c => c.CompanyId == companyId.Value));
+        }
+        var hrUsers = await hrQuery.ToListAsync(ct);
+        foreach (var hr in hrUsers)
+        {
+            if (user != null && hr.Id == user.Id) continue;
+            var dateStr = dto.FromDate == dto.ToDate
+                ? dto.FromDate.ToString("dd/MM/yyyy")
+                : $"{dto.FromDate:dd/MM/yyyy} - {dto.ToDate:dd/MM/yyyy}";
+            _db.Notifications.Add(new Notification
+            {
+                UserId = hr.Id,
+                Title = "Đơn xin nghỉ phép mới cần duyệt",
+                Body = $"Nhân viên {employeeCode} vừa gửi đơn xin nghỉ phép ({daysRequested:0.#} ngày: {dateStr}).",
+                LinkType = "LEAVE",
+                LinkId = req.RequestId,
+                IsRead = false,
+                CreatedAtUtc = DateTime.UtcNow
+            });
+        }
+        await _db.SaveChangesAsync(ct);
+
         return req;
     }
 
-    public async Task<EmployeeRequest> SubmitRegularizationRequestAsync(string employeeCode, CreateRegularizationDto dto, CancellationToken ct = default)
+    public async Task<EmployeeRequest> SubmitRegularizationRequestAsync(string employeeCode, CreateRegularizationDto dto, int? companyId = null, CancellationToken ct = default)
     {
         if (dto.ActualTimeIn >= dto.ActualTimeOut)
         {
@@ -197,11 +272,18 @@ public class EmployeeRequestService : IEmployeeRequestService
             throw AppException.Bad($"Chỉ được giải trình cho ngày trong vòng {maxBackdateDays} ngày gần nhất.");
         }
 
-        var existingReg = await _db.EmployeeRequests.AnyAsync(r =>
+        var regQuery = _db.EmployeeRequests.Where(r =>
             r.EmployeeCode == employeeCode &&
             r.RequestType == "REGULARIZATION" &&
             r.FromDate == dto.WorkDate &&
-            r.Status == "PENDING_HR", ct);
+            r.Status == "PENDING_HR");
+
+        if (companyId.HasValue)
+        {
+            regQuery = regQuery.Where(r => r.CompanyId == companyId.Value || r.CompanyId == null);
+        }
+
+        var existingReg = await regQuery.AnyAsync(ct);
 
         if (existingReg)
         {
@@ -210,6 +292,7 @@ public class EmployeeRequestService : IEmployeeRequestService
 
         var req = new EmployeeRequest
         {
+            CompanyId = companyId,
             RequestType = "REGULARIZATION",
             EmployeeCode = employeeCode,
             FromDate = dto.WorkDate,
@@ -232,6 +315,55 @@ public class EmployeeRequestService : IEmployeeRequestService
         {
             await SaveAttachmentsAsync(req.RequestId, dto.Files, ct);
         }
+
+        // Tạo thông báo cho nhân viên nộp giải trình
+        var userQuery = _db.Users.Where(u =>
+            (u.EmployeeCode != null && u.EmployeeCode.ToLower() == employeeCode.ToLower()) ||
+            u.Username.ToLower() == employeeCode.ToLower());
+
+        if (companyId.HasValue)
+        {
+            userQuery = userQuery.Where(u => u.Companies.Any(c => c.CompanyId == companyId.Value));
+        }
+
+        var user = await userQuery.FirstOrDefaultAsync(ct);
+
+        if (user != null)
+        {
+            _db.Notifications.Add(new Notification
+            {
+                UserId = user.Id,
+                Title = "Giải trình chấm công đang chờ duyệt",
+                Body = $"Giải trình quên bấm công ngày {dto.WorkDate:dd/MM/yyyy} ({dto.ActualTimeIn:hh\\:mm} - {dto.ActualTimeOut:hh\\:mm}) đã được gửi và đang chờ HCNS xem xét.",
+                LinkType = "REGULARIZATION",
+                LinkId = req.RequestId,
+                IsRead = false,
+                CreatedAtUtc = DateTime.UtcNow
+            });
+        }
+
+        // Tạo thông báo cho HCNS / Quản lý của chi nhánh/hội sở
+        var hrQuery = _db.Users.Where(u => u.Role == "HR" || u.Role == "Admin");
+        if (companyId.HasValue)
+        {
+            hrQuery = hrQuery.Where(u => u.Role == "Admin" || u.Companies.Any(c => c.CompanyId == companyId.Value));
+        }
+        var hrUsers = await hrQuery.ToListAsync(ct);
+        foreach (var hr in hrUsers)
+        {
+            if (user != null && hr.Id == user.Id) continue;
+            _db.Notifications.Add(new Notification
+            {
+                UserId = hr.Id,
+                Title = "Giải trình chấm công mới cần duyệt",
+                Body = $"Nhân viên {employeeCode} vừa gửi giải trình chấm công ngày {dto.WorkDate:dd/MM/yyyy}.",
+                LinkType = "REGULARIZATION",
+                LinkId = req.RequestId,
+                IsRead = false,
+                CreatedAtUtc = DateTime.UtcNow
+            });
+        }
+        await _db.SaveChangesAsync(ct);
 
         return req;
     }
@@ -295,7 +427,12 @@ public class EmployeeRequestService : IEmployeeRequestService
         req.HRNote = note;
         req.UpdatedAtUtc = DateTime.UtcNow;
 
-        var emp = await _db.Employees.FirstOrDefaultAsync(e => e.EmployeeCode == req.EmployeeCode, ct);
+        var empQuery = _db.Employees.Where(e => e.EmployeeCode == req.EmployeeCode);
+        if (req.CompanyId.HasValue)
+        {
+            empQuery = empQuery.Where(e => e.CompanyId == req.CompanyId.Value);
+        }
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
 
         if (approve && emp != null)
         {
@@ -351,11 +488,17 @@ public class EmployeeRequestService : IEmployeeRequestService
             else if (req.RequestType == "REGULARIZATION")
             {
                 // Ghi nhận điều chỉnh giờ
-                var existingAdj = await _db.TimeAdjustments.FirstOrDefaultAsync(a => a.EmployeeCode == req.EmployeeCode && a.WorkDate == req.FromDate, ct);
+                var adjQuery = _db.TimeAdjustments.Where(a => a.EmployeeCode == req.EmployeeCode && a.WorkDate == req.FromDate);
+                if (req.CompanyId.HasValue)
+                {
+                    adjQuery = adjQuery.Where(a => a.CompanyId == req.CompanyId.Value || a.CompanyId == null);
+                }
+                var existingAdj = await adjQuery.FirstOrDefaultAsync(ct);
                 if (existingAdj == null)
                 {
                     _db.TimeAdjustments.Add(new TimeAdjustment
                     {
+                        CompanyId = req.CompanyId,
                         EmployeeCode = req.EmployeeCode,
                         WorkDate = req.FromDate,
                         AdjInTime = req.ActualTimeIn,
@@ -367,6 +510,7 @@ public class EmployeeRequestService : IEmployeeRequestService
                 }
                 else
                 {
+                    if (req.CompanyId.HasValue) existingAdj.CompanyId = req.CompanyId.Value;
                     existingAdj.AdjInTime = req.ActualTimeIn;
                     existingAdj.AdjOutTime = req.ActualTimeOut;
                     existingAdj.SourceRequestId = req.RequestId;
@@ -376,21 +520,31 @@ public class EmployeeRequestService : IEmployeeRequestService
                 await _db.SaveChangesAsync(ct);
 
                 // Tự động tính toán lại gộp ngày công cho ngày này
-                await _punchService.AggregateDailySummaryAsync(req.EmployeeCode, req.FromDate, ct);
+                await _punchService.AggregateDailySummaryAsync(req.EmployeeCode, req.FromDate, req.CompanyId, ct);
             }
         }
 
         // Tạo thông báo cho nhân viên
-        var user = await _db.Users.FirstOrDefaultAsync(u => u.EmployeeCode == req.EmployeeCode, ct);
+        var notifyUserQuery = _db.Users.Where(u =>
+            (u.EmployeeCode != null && u.EmployeeCode.ToLower() == req.EmployeeCode.ToLower()) ||
+            u.Username.ToLower() == req.EmployeeCode.ToLower());
+
+        if (req.CompanyId.HasValue)
+        {
+            notifyUserQuery = notifyUserQuery.Where(u => u.Companies.Any(c => c.CompanyId == req.CompanyId.Value));
+        }
+
+        var user = await notifyUserQuery.FirstOrDefaultAsync(ct);
         if (user != null)
         {
-            var actionText = approve ? "được phê duyệt" : "bị từ chối";
+            var actionText = approve ? "đã được phê duyệt" : "đã bị từ chối";
             var typeText = req.RequestType == "LEAVE" ? "Đơn nghỉ phép" : "Giải trình chấm công";
+            var dateStr = req.FromDate == req.ToDate ? req.FromDate.ToString("dd/MM/yyyy") : $"{req.FromDate:dd/MM/yyyy} - {req.ToDate:dd/MM/yyyy}";
             _db.Notifications.Add(new Notification
             {
                 UserId = user.Id,
                 Title = $"{typeText} {actionText}",
-                Body = $"{typeText} ngày {req.FromDate:dd/MM/yyyy} của bạn đã {actionText}." + (string.IsNullOrWhiteSpace(note) ? "" : $" Ghi chú: {note}"),
+                Body = $"{typeText} ({dateStr}) của bạn {actionText}." + (string.IsNullOrWhiteSpace(note) ? "" : $" Ghi chú từ HCNS: {note}"),
                 LinkType = req.RequestType,
                 LinkId = req.RequestId,
                 IsRead = false,

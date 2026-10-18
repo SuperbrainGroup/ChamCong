@@ -20,6 +20,7 @@ public class AppDbContext : DbContext
     public DbSet<RawPunch> RawPunches => Set<RawPunch>();
     public DbSet<LeaveRequest> LeaveRequests => Set<LeaveRequest>();
     public DbSet<DayResult> DayResults => Set<DayResult>();
+    public DbSet<DayResultManualBackup> DayResultManualBackups => Set<DayResultManualBackup>();
     public DbSet<PeriodNote> PeriodNotes => Set<PeriodNote>();
     public DbSet<LeaveFund> LeaveFunds => Set<LeaveFund>();
     public DbSet<LeaveLedgerEntry> LeaveLedger => Set<LeaveLedgerEntry>();
@@ -106,6 +107,12 @@ public class AppDbContext : DbContext
             e.Property(x => x.InTime).HasMaxLength(20);
             e.Property(x => x.OutTime).HasMaxLength(20);
         });
+        b.Entity<DayResultManualBackup>(e =>
+        {
+            e.ToTable("DayResultManualBackups");
+            e.Property(x => x.Date).HasColumnType("date");
+            e.Property(x => x.PaidValue).HasColumnType("decimal(4,2)");
+        });
         b.Entity<PeriodNote>().ToTable("PeriodNotes").HasKey(x => new { x.PeriodId, x.EmployeeId });
         b.Entity<LeaveFund>(e =>
         {
@@ -181,7 +188,7 @@ public class AppDbContext : DbContext
         });
         b.Entity<DailyPunchSummary>(e =>
         {
-            e.ToTable("tbl_DailyPunchSummary").HasKey(x => new { x.EmployeeCode, x.WorkDate });
+            e.ToTable("tbl_DailyPunchSummary").HasKey(x => new { x.CompanyId, x.EmployeeCode, x.WorkDate });
             e.Property(x => x.WorkDate).HasColumnType("date");
             e.Property(x => x.InTime).HasColumnType("time(0)");
             e.Property(x => x.OutTime).HasColumnType("time(0)");

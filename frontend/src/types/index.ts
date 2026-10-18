@@ -44,7 +44,7 @@ export interface PunchItem {
 
 export interface PunchState {
   workDate: string;
-  currentMode: 'CHECK_IN' | 'CHECKED_IN' | 'CHECK_OUT' | 'COMPLETED';
+  currentMode: 'CHECK_IN' | 'CHECKED_IN' | 'WORKING' | 'WORKING_NOT_CHECKED_IN' | 'CHECK_OUT' | 'COMPLETED' | 'NEED_EXPLANATION';
   hasValidCheckin?: boolean;
   canCheckout?: boolean;
   remainingMinutesToCheckout?: number;
@@ -54,12 +54,38 @@ export interface PunchState {
   clientPublicIp: string;
   pcMacAddress?: string;
   pcApprovalStatus?: string;
+  allowCheckoutWithExplanation?: boolean;
+  shift?: {
+    shiftStart: string;
+    shiftEnd: string;
+    checkoutStartTime: string;
+    checkoutPrepareMinutes: number;
+    lunchStart: string;
+    lunchMinutes: number;
+    standardRange: string;
+    isCheckinWindow: boolean;
+    isWorkingWindow: boolean;
+    isCheckoutWindow: boolean;
+    isPastShiftEnd: boolean;
+    statusLabel: string;
+    statusDescription: string;
+  };
+  explanationPrompt?: {
+    required: boolean;
+    suggestedDate: string;
+    suggestedInTime: string;
+    suggestedOutTime: string;
+    reason: string;
+  } | null;
   punches: PunchItem[];
 }
 
 export interface UserRequestItem {
   requestId: number;
   requestType: 'LEAVE' | 'REGULARIZATION';
+  employeeCode?: string;
+  fullName?: string;
+  departmentName?: string;
   leaveCode?: string;
   fromDate: string;
   toDate: string;
@@ -274,6 +300,8 @@ export interface GridEmployeeRow {
     groupName: string;
     exemptPunch: boolean;
     defaultNote?: string;
+    startDate?: string;
+    endDate?: string;
   };
   note: string;
   summary: MonthSummary;

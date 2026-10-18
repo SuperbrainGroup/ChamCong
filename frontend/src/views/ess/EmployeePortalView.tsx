@@ -27,6 +27,7 @@ import {
 } from '../../utils/pushNotification';
 import {
   Clock,
+  Lock,
   MapPin,
   Wifi,
   Calendar,
@@ -78,8 +79,6 @@ export const EmployeePortalView: React.FC = () => {
 
   // Đếm ngược giãn cách 60 giây giữa 2 lần bấm chấm công
   const [punchCooldownSeconds, setPunchCooldownSeconds] = useState<number>(0);
-  // Cho phép nhân viên chủ động mở nút Check-out khi cần ra về sớm
-  const [forceEnableCheckout, setForceEnableCheckout] = useState(false);
 
   // Đơn từ
   const [myRequests, setMyRequests] = useState<UserRequestItem[]>([]);
@@ -230,9 +229,37 @@ export const EmployeePortalView: React.FC = () => {
     return () => clearInterval(interval);
   }, [punchCooldownSeconds]);
 
+  // Tự động kiểm tra cập nhật trạng thái mở nút Check-out khi đang trong ca
+  useEffect(() => {
+    if (!punchState?.hasValidCheckin || punchState?.canCheckout || punchState?.currentMode === 'COMPLETED') return;
+    const interval = setInterval(async () => {
+      try {
+        const state = await attendanceApi.getState();
+        setPunchState(state);
+      } catch {}
+    }, 20000);
+    return () => clearInterval(interval);
+  }, [punchState?.hasValidCheckin, punchState?.canCheckout, punchState?.currentMode]);
+
   // Kiểm tra xem máy hiện tại đã có mã secret chưa
   const hasLocalDeviceSecret = !!localStorage.getItem('device_secret');
-  const isMobile = window.innerWidth <= 768;
+  
+  // Tự động nhận diện thiết bị truy cập (Mobile vs PC)
+  const checkIsMobileClient = (): boolean => {
+    if (typeof window === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
+    return isMobileUA || window.innerWidth <= 768;
+  };
+  const [isCurrentClientMobile, setIsCurrentClientMobile] = useState<boolean>(() => checkIsMobileClient());
+
+  useEffect(() => {
+    const handleResize = () => setIsCurrentClientMobile(checkIsMobileClient());
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  const isMobile = isCurrentClientMobile;
 
   // Lấy hoặc tự sinh MAC Address surrogate duy nhất cho thiết bị (PC / Mobile)
   const getOrGenerateMacAddress = (): string => {
@@ -248,22 +275,41 @@ export const EmployeePortalView: React.FC = () => {
   };
 
   // Mở modal đăng ký thiết bị: tự động nhận diện PC/Mobile và gán tên theo tên nhân viên
-  const openRegisterDeviceModal = () => {
-    const isCurrentlyPc = !isMobile;
-    const targetType = isCurrentlyPc ? 'PC' : 'MOBILE';
-    setRegisteringDeviceType(targetType);
-    const defaultName = isCurrentlyPc
+  const openRegisterDeviceModal = (targetType?: unknown) => {
+    // Trên điện thoại: CHỈ được đăng ký Mobile; Trên PC: CHỈ được đăng ký PC
+    const allowedType: 'MOBILE' | 'PC' = isCurrentClientMobile ? 'MOBILE' : 'PC';
+    const finalType = (targetType === 'MOBILE' || targetType === 'PC') ? targetType : allowedType;
+    setRegisteringDeviceType(finalType);
+    const defaultName = finalType === 'PC'
       ? `PC - ${user?.fullName || 'Nhân viên'}`
       : `Mobile - ${user?.fullName || 'Nhân viên'}`;
     setDeviceNameInput(defaultName);
     setShowRegisterModal(true);
   };
 
+  // Mở nhanh modal giải trình công đã điền sẵn giờ vào ca sáng
+  const handleOpenQuickRegularization = () => {
+    const todayStr = punchState?.workDate || new Date().toISOString().split('T')[0];
+    const shiftStart = punchState?.shift?.shiftStart || '08:00';
+    const nowTimeStr = currentTime.toTimeString().substring(0, 5);
+    setRegulDate(todayStr);
+    setRegulInTime(shiftStart);
+    setRegulOutTime(nowTimeStr);
+    setRegulReasonCode('Quên bấm');
+    setRegulReason('Quên điểm danh vào ca khi đến giờ chuẩn bị ra về');
+    setShowRegulModal(true);
+  };
+
   // Thực hiện quẹt thẻ (Check-in / Check-out)
-  const handlePunch = async () => {
+  const handlePunch = async (specificType?: 'AUTO' | 'CHECK_IN' | 'CHECK_OUT') => {
     // 1. Kiểm tra giãn cách tối thiểu 60 giây giữa 2 lần bấm
     if (punchState?.currentMode === 'COMPLETED') {
       addToast('Hôm nay bạn đã thực hiện đủ 1 lượt Check-in và 1 lượt Check-out. Hệ thống không cho phép chấm công thêm để tránh dữ liệu trùng lặp.', 'info');
+      return;
+    }
+
+    if (punchState?.hasValidCheckin && !punchState?.canCheckout) {
+      addToast(`Bạn vừa Check-in lúc ${punchState?.firstPunchTime || ''}. Để tránh bấm nhầm Check-out khi vừa vào làm, ca làm việc cần tối thiểu 30 phút trước khi Check-out (còn lại ${punchState?.remainingMinutesToCheckout ?? 30} phút).`, 'warning');
       return;
     }
 
@@ -287,6 +333,7 @@ export const EmployeePortalView: React.FC = () => {
     setPunchStatusMessage('Đang lấy vị trí GPS...');
 
     const channel = isMobile ? 'MOBILE_PWA' : 'PC_WEB';
+    const targetPunchType = specificType || (punchState?.canCheckout ? 'CHECK_OUT' : (punchState?.currentMode === 'NEED_EXPLANATION' ? 'CHECK_OUT' : 'AUTO'));
 
     const performCall = async (lat?: number, lng?: number, accuracy?: number, gpsError?: string) => {
       setPunchStatusMessage('Đang gửi dữ liệu xác thực...');
@@ -297,22 +344,24 @@ export const EmployeePortalView: React.FC = () => {
           accuracy: accuracy,
           gpsError: gpsError,
           channel: channel,
-          macAddress: getOrGenerateMacAddress()
+          macAddress: getOrGenerateMacAddress(),
+          punchType: targetPunchType
         });
 
         setLastPunchResult(result);
         const state = await attendanceApi.getState();
         setPunchState(state);
-        setForceEnableCheckout(false);
 
         // Kích hoạt bộ đếm 60 giây giãn cách sau lượt bấm thành công
         setPunchCooldownSeconds(60);
 
         const timeStr = result.checkTimeLocal ? (result.checkTimeLocal.split(' ')[1] || result.checkTimeLocal) : '';
-        const isCheckoutAction = punchState?.currentMode === 'CHECK_OUT' || forceEnableCheckout;
+        const isCheckoutAction = targetPunchType === 'CHECK_OUT' || punchState?.canCheckout || punchState?.currentMode === 'NEED_EXPLANATION';
         const modeLabel = isCheckoutAction ? 'Ra về (Check-out)' : 'Vào làm (Check-in)';
 
-        if (result.verificationStatus === 'VALID') {
+        if (result.needsExplanation) {
+          addToast(`Đã ghi nhận ${modeLabel} lúc ${timeStr}. Do chưa có lượt Check-in buổi sáng, bạn vui lòng nộp Đơn giải trình bổ sung công.`, 'warning');
+        } else if (result.verificationStatus === 'VALID') {
           addToast(`Điểm danh ${modeLabel} thành công! Giờ ghi nhận: ${timeStr}`, 'success');
           triggerMobilePushNotification({
             title: `✅ ${settings.siteTitle || 'Hệ Thống'}: Điểm danh ${modeLabel} thành công`,
@@ -379,6 +428,16 @@ export const EmployeePortalView: React.FC = () => {
   // Đăng ký thiết bị (PC tự động lấy MAC address và tên nhân viên, submit 1 chạm)
   const handleRegisterDevice = async () => {
     try {
+      const isTargetMobile = registeringDeviceType === 'MOBILE';
+      if (isCurrentClientMobile && !isTargetMobile) {
+        addToast('Trên điện thoại di động chỉ được đăng ký thiết bị Mobile. Máy tính (PC) phải đăng ký trực tiếp trên máy tính.', 'warning');
+        return;
+      }
+      if (!isCurrentClientMobile && isTargetMobile) {
+        addToast('Trên máy tính chỉ được đăng ký thiết bị PC. Vui lòng mở điện thoại để đăng ký Mobile.', 'warning');
+        return;
+      }
+
       const isPc = registeringDeviceType === 'PC';
       const os = navigator.userAgent.includes('iPhone') || navigator.userAgent.includes('iPad') ? 'iOS' :
         navigator.userAgent.includes('Android') ? 'Android' :
@@ -625,7 +684,7 @@ export const EmployeePortalView: React.FC = () => {
                 {currentTime.toLocaleTimeString('vi-VN')}
               </div>
 
-              <div style={{ display: 'flex', justifyContent: 'center', gap: 16, fontSize: 13, color: '#64748B', marginBottom: 24 }}>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: 16, fontSize: 13, color: '#64748B', marginBottom: 14 }}>
                 <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                   <Wifi size={16} color="#0056B3" />
                   IP: {punchState?.clientPublicIp || 'Đang nhận diện...'}
@@ -636,11 +695,107 @@ export const EmployeePortalView: React.FC = () => {
                 </span>
               </div>
 
-              {/* NÚT TRÒN LỚN CHẤM CÔNG (RADAR EFFECT) */}
+              {/* Badge Ca làm việc của Hội sở */}
+              {punchState?.shift && (
+                <div style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  backgroundColor: '#F1F5F9',
+                  border: '1px solid #E2E8F0',
+                  padding: '6px 14px',
+                  borderRadius: 20,
+                  fontSize: 12,
+                  color: '#475569',
+                  marginBottom: 18,
+                  fontWeight: 600
+                }}>
+                  <Clock size={14} color="#0056B3" />
+                  <span>Ca hội sở: <strong style={{ color: '#0F172A' }}>{punchState.shift.shiftStart} - {punchState.shift.shiftEnd}</strong></span>
+                  <span style={{ color: '#CBD5E1' }}>•</span>
+                  <span>Mở tan ca: <strong style={{ color: '#0056B3' }}>{punchState.shift.checkoutStartTime}</strong></span>
+                </div>
+              )}
+
+              {/* NÚT TRÒN LỚN CHẤM CÔNG (RADAR EFFECT) HOẶC NÚT GIẢI TRÌNH KHI CHƯA CHECKIN GIỜ TAN CA */}
               {(() => {
-                const isCompletedState = punchState?.currentMode === 'COMPLETED';
-                const isWorkingState = punchState?.currentMode === 'CHECKED_IN' && !forceEnableCheckout && !isCompletedState;
-                const isCheckoutState = (punchState?.currentMode === 'CHECK_OUT' || forceEnableCheckout) && !isCompletedState;
+                const isCompletedState = punchState?.currentMode === 'COMPLETED' || (punchState?.todayPunchCount !== undefined && punchState.todayPunchCount >= 2);
+                const isNeedExplanation = punchState?.currentMode === 'NEED_EXPLANATION';
+                const isWorkingNotCheckedIn = punchState?.currentMode === 'WORKING_NOT_CHECKED_IN';
+                const isWorkingState = punchState?.currentMode === 'WORKING' || (!!punchState?.hasValidCheckin && !punchState?.canCheckout && !isCompletedState && !isNeedExplanation);
+                const isCheckoutState = punchState?.currentMode === 'CHECK_OUT' || (!!punchState?.canCheckout && !isCompletedState && !isNeedExplanation);
+
+                // Trường hợp ĐẶC BIỆT: Đến giờ chuẩn bị tan ca nhưng sáng chưa quẹt Check-in
+                if (isNeedExplanation) {
+                  return (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '16px 0', width: '100%' }}>
+                      <div style={{
+                        padding: '14px 16px',
+                        backgroundColor: '#FFFBEB',
+                        border: '1.5px solid #F59E0B',
+                        borderRadius: 14,
+                        marginBottom: 18,
+                        maxWidth: 420,
+                        width: '100%',
+                        textAlign: 'left',
+                        boxShadow: '0 4px 12px rgba(245, 158, 11, 0.12)'
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 800, fontSize: 14, color: '#B45309', marginBottom: 4 }}>
+                          <AlertTriangle size={20} color="#D97706" />
+                          <span>CHƯA CHECK-IN — ĐÃ ĐẾN GIỜ TAN CA!</span>
+                        </div>
+                        <div style={{ fontSize: 12, color: '#92400E', lineHeight: 1.5 }}>
+                          {punchState?.explanationPrompt?.reason || 'Hiện tại đã đến giờ chuẩn bị ra về nhưng hệ thống ghi nhận bạn chưa điểm danh vào sáng nay. Vui lòng bấm gửi đơn giải trình để được bổ sung công.'}
+                        </div>
+                      </div>
+
+                      {/* NÚT CHÍNH: Gửi đơn giải trình bổ sung công */}
+                      <button
+                        onClick={handleOpenQuickRegularization}
+                        style={{
+                          width: '100%',
+                          maxWidth: 360,
+                          padding: '16px 20px',
+                          borderRadius: 16,
+                          backgroundColor: '#D97706',
+                          color: '#FFFFFF',
+                          border: 'none',
+                          cursor: 'pointer',
+                          boxShadow: '0 8px 20px rgba(217, 119, 6, 0.35)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 10,
+                          fontSize: 15,
+                          fontWeight: 800,
+                          transition: 'all 0.2s ease',
+                          marginBottom: 12
+                        }}
+                      >
+                        <FileText size={22} />
+                        <span>GỬI ĐƠN GIẢI TRÌNH CÔNG (1 CHẠM)</span>
+                      </button>
+
+                      {/* Nút phụ: Điểm danh ra về kèm giải trình */}
+                      <button
+                        onClick={() => handlePunch('CHECK_OUT')}
+                        disabled={punching}
+                        style={{
+                          backgroundColor: 'transparent',
+                          color: '#B45309',
+                          border: '1px dashed #D97706',
+                          borderRadius: 10,
+                          padding: '10px 16px',
+                          fontSize: 13,
+                          fontWeight: 700,
+                          cursor: punching ? 'wait' : 'pointer'
+                        }}
+                      >
+                        {punching ? 'Đang gửi...' : 'Điểm danh ra về (Check-out) kèm cờ giải trình'}
+                      </button>
+                    </div>
+                  );
+                }
 
                 let btnBg = '#0056B3';
                 let btnBorder = '6px solid #FFC72C';
@@ -663,16 +818,16 @@ export const EmployeePortalView: React.FC = () => {
                   btnMainText = 'ĐÃ HOÀN TẤT';
                   btnSubText = '1 lượt Vào & 1 lượt Ra';
                 } else if (isWorkingState) {
+                  btnBg = '#F1F5F9';
+                  btnBorder = '6px solid #CBD5E1';
+                  btnShadow = 'none';
+                  btnIcon = <Lock size={36} color="#64748B" style={{ marginBottom: 6 }} />;
+                  btnMainText = 'ĐANG LÀM';
+                  btnSubText = punchState?.remainingMinutesToCheckout ? `Mở sau ${punchState.remainingMinutesToCheckout}p` : 'Trong ca làm';
+                } else if (isCheckoutState) {
                   btnBg = '#16A34A';
                   btnBorder = '6px solid #86EFAC';
                   btnShadow = '0 8px 24px rgba(22, 163, 74, 0.35)';
-                  btnIcon = <CheckCircle2 size={36} style={{ marginBottom: 6 }} />;
-                  btnMainText = 'ĐÃ CHECK-IN';
-                  btnSubText = `Vào làm: ${punchState?.firstPunchTime || 'Hôm nay'}`;
-                } else if (isCheckoutState) {
-                  btnBg = '#E31837';
-                  btnBorder = '6px solid #FFC72C';
-                  btnShadow = '0 8px 24px rgba(227, 24, 55, 0.35)';
                   btnIcon = <Clock size={36} style={{ marginBottom: 6 }} />;
                   btnMainText = 'CHECK-OUT';
                   btnSubText = 'Bấm để ra về';
@@ -680,6 +835,21 @@ export const EmployeePortalView: React.FC = () => {
 
                 return (
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '20px 0' }}>
+                    {isWorkingNotCheckedIn && (
+                      <div style={{
+                        marginBottom: 16,
+                        padding: '10px 14px',
+                        backgroundColor: '#FEF3C7',
+                        border: '1px solid #F59E0B',
+                        borderRadius: 10,
+                        fontSize: 12,
+                        color: '#92400E',
+                        maxWidth: 360,
+                        textAlign: 'center'
+                      }}>
+                        ⚠️ Đã qua giờ bắt đầu ca ({punchState?.shift?.shiftStart || '08:00'}), bạn chưa Check-in hôm nay. Vui lòng Check-in ngay!
+                      </div>
+                    )}
                     <button
                       onClick={() => {
                         if (isCompletedState) {
@@ -687,20 +857,20 @@ export const EmployeePortalView: React.FC = () => {
                           return;
                         }
                         if (isWorkingState) {
-                          addToast(`Bạn đã check-in lúc ${punchState?.firstPunchTime}. Đang trong thời gian làm việc.`, 'info');
+                          addToast(`Bạn vừa Check-in lúc ${punchState?.firstPunchTime}. Để tránh bấm nhầm Check-out khi vừa vào làm, ca làm việc cần tối thiểu 30 phút trước khi Check-out (còn lại ${punchState?.remainingMinutesToCheckout ?? 30} phút).`, 'warning');
                           return;
                         }
-                        handlePunch();
+                        handlePunch(isCheckoutState ? 'CHECK_OUT' : 'CHECK_IN');
                       }}
-                      disabled={punching || isCompletedState}
+                      disabled={punching || isCompletedState || isWorkingState}
                       style={{
                         width: 170,
                         height: 170,
                         borderRadius: '50%',
                         backgroundColor: btnBg,
-                        color: '#FFFFFF',
+                        color: isWorkingState ? '#64748B' : '#FFFFFF',
                         border: btnBorder,
-                        cursor: punching ? 'wait' : (isWorkingState || isCompletedState ? 'default' : 'pointer'),
+                        cursor: punching ? 'wait' : (isWorkingState || isCompletedState ? 'not-allowed' : 'pointer'),
                         boxShadow: btnShadow,
                         display: 'flex',
                         flexDirection: 'column',
@@ -720,16 +890,16 @@ export const EmployeePortalView: React.FC = () => {
                       </span>
                     </button>
 
-                    {/* Khung hướng dẫn & tùy chọn mở Check-out khi đang trong ca */}
+                    {/* Khung hướng dẫn khi đang trong ca */}
                     {isWorkingState && (
                       <div style={{
                         marginTop: 14,
-                        padding: '10px 16px',
-                        backgroundColor: '#F0FDF4',
-                        border: '1px solid #BBF7D0',
+                        padding: '12px 18px',
+                        backgroundColor: '#EFF6FF',
+                        border: '1px solid #BFDBFE',
                         borderRadius: 10,
                         fontSize: 12,
-                        color: '#166534',
+                        color: '#1E40AF',
                         maxWidth: 320,
                         textAlign: 'center',
                         display: 'flex',
@@ -739,29 +909,10 @@ export const EmployeePortalView: React.FC = () => {
                       }}>
                         <div>
                           <strong>Đang trong ca làm việc</strong> (Vào: {punchState?.firstPunchTime})
-                          {punchState?.remainingMinutesToCheckout && punchState.remainingMinutesToCheckout > 0 ? (
-                            <span style={{ display: 'block', color: '#15803D', marginTop: 2 }}>
-                              Nút Check-out sẽ tự động mở sau {punchState.remainingMinutesToCheckout} phút nữa.
-                            </span>
-                          ) : null}
+                          <span style={{ display: 'block', color: '#1D4ED8', marginTop: 4 }}>
+                            Để tránh quẹt nhầm Check-out khi vừa vào làm, nút Check-out sẽ tự động mở sau <b>{punchState?.remainingMinutesToCheckout ?? 30} phút</b> nữa.
+                          </span>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => setForceEnableCheckout(true)}
-                          style={{
-                            backgroundColor: 'transparent',
-                            border: '1px solid #16A34A',
-                            color: '#15803D',
-                            padding: '3px 10px',
-                            borderRadius: 6,
-                            fontSize: 11,
-                            fontWeight: 700,
-                            cursor: 'pointer',
-                            transition: 'all 0.15s ease'
-                          }}
-                        >
-                          Ra về sớm? Mở nút Check-out
-                        </button>
                       </div>
                     )}
 
@@ -1201,22 +1352,59 @@ export const EmployeePortalView: React.FC = () => {
             {/* Quản lý 2 khe thiết bị (Mobile / PC) */}
             <div style={{ backgroundColor: '#FFFFFF', borderRadius: 16, padding: 20, boxShadow: '0 2px 10px rgba(0,0,0,0.05)', marginBottom: 16 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                <div style={{ fontWeight: 700, fontSize: 15, color: '#1E293B' }}>Thiết bị liên kết (Tối đa 2 khe)</div>
-                <button
-                  onClick={openRegisterDeviceModal}
-                  style={{
-                    backgroundColor: '#0056B3',
-                    color: '#FFF',
-                    border: 'none',
-                    padding: '6px 12px',
-                    borderRadius: 6,
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: 'pointer'
-                  }}
-                >
-                  Đăng ký máy
-                </button>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: '#1E293B' }}>Thiết bị liên kết (Tối đa 2 khe)</div>
+                  <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>
+                    Đang truy cập từ: <strong>{isCurrentClientMobile ? '📱 Điện thoại (Mobile)' : '💻 Máy tính (PC)'}</strong>
+                  </div>
+                </div>
+                {isCurrentClientMobile ? (
+                  !myDevices.mobile ? (
+                    <button
+                      onClick={() => openRegisterDeviceModal('MOBILE')}
+                      style={{
+                        backgroundColor: '#0056B3',
+                        color: '#FFF',
+                        border: 'none',
+                        padding: '6px 12px',
+                        borderRadius: 6,
+                        fontSize: 12,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        boxShadow: '0 2px 6px rgba(0, 86, 179, 0.2)'
+                      }}
+                    >
+                      📱 Đăng ký Mobile
+                    </button>
+                  ) : (
+                    <span style={{ fontSize: 11, color: '#16A34A', fontWeight: 700, backgroundColor: '#DCFCE7', padding: '4px 8px', borderRadius: 6 }}>
+                      ✓ Mobile đã liên kết
+                    </span>
+                  )
+                ) : (
+                  !myDevices.pc ? (
+                    <button
+                      onClick={() => openRegisterDeviceModal('PC')}
+                      style={{
+                        backgroundColor: '#0056B3',
+                        color: '#FFF',
+                        border: 'none',
+                        padding: '6px 12px',
+                        borderRadius: 6,
+                        fontSize: 12,
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        boxShadow: '0 2px 6px rgba(0, 86, 179, 0.2)'
+                      }}
+                    >
+                      💻 Đăng ký PC
+                    </button>
+                  ) : (
+                    <span style={{ fontSize: 11, color: '#16A34A', fontWeight: 700, backgroundColor: '#DCFCE7', padding: '4px 8px', borderRadius: 6 }}>
+                      ✓ PC đã liên kết
+                    </span>
+                  )
+                )}
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
@@ -1224,40 +1412,98 @@ export const EmployeePortalView: React.FC = () => {
                 <div style={{
                   padding: 12,
                   borderRadius: 10,
-                  backgroundColor: '#F8FAFC',
-                  border: '1px solid #E2E8F0',
-                  textAlign: 'center'
+                  backgroundColor: isCurrentClientMobile ? '#EFF6FF' : '#F8FAFC',
+                  border: isCurrentClientMobile ? '1.5px solid #BFDBFE' : '1px solid #E2E8F0',
+                  textAlign: 'center',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'space-between'
                 }}>
-                  <Smartphone size={24} color="#0056B3" style={{ margin: '0 auto 6px auto' }} />
-                  <div style={{ fontWeight: 700, fontSize: 13, color: '#1E293B' }}>Điện thoại (Mobile)</div>
-                  <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>
+                  <div>
+                    <Smartphone size={24} color="#0056B3" style={{ margin: '0 auto 6px auto' }} />
+                    <div style={{ fontWeight: 700, fontSize: 13, color: '#1E293B' }}>Điện thoại (Mobile)</div>
+                    <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>
+                      {myDevices.mobile ? (
+                        <span style={{ color: myDevices.mobile.approvalStatus === 'APPROVED' ? '#16A34A' : '#D97706', fontWeight: 600 }}>
+                          {myDevices.mobile.deviceName}
+                        </span>
+                      ) : (
+                        'Chưa đăng ký'
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 8 }}>
                     {myDevices.mobile ? (
-                      <span style={{ color: myDevices.mobile.approvalStatus === 'APPROVED' ? '#16A34A' : '#D97706', fontWeight: 600 }}>
-                        {myDevices.mobile.deviceName} ({myDevices.mobile.approvalStatus})
-                      </span>
+                      <span style={{ fontSize: 11, color: '#16A34A', fontWeight: 700 }}>✓ Đã liên kết</span>
+                    ) : isCurrentClientMobile ? (
+                      <button
+                        onClick={() => openRegisterDeviceModal('MOBILE')}
+                        style={{
+                          backgroundColor: '#0056B3',
+                          color: '#FFF',
+                          border: 'none',
+                          borderRadius: 6,
+                          padding: '4px 10px',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer'
+                        }}
+                      >
+                        Đăng ký máy này
+                      </button>
                     ) : (
-                      'Chưa đăng ký'
+                      <span style={{ fontSize: 10, color: '#94A3B8' }}>🔒 Đăng ký trên điện thoại</span>
                     )}
                   </div>
                 </div>
 
-                {/* Khe Máy tính */}
+                {/* Khe Máy tính (PC) */}
                 <div style={{
                   padding: 12,
                   borderRadius: 10,
-                  backgroundColor: '#F8FAFC',
-                  border: '1px solid #E2E8F0',
-                  textAlign: 'center'
+                  backgroundColor: !isCurrentClientMobile ? '#EFF6FF' : '#F8FAFC',
+                  border: !isCurrentClientMobile ? '1.5px solid #BFDBFE' : '1px solid #E2E8F0',
+                  textAlign: 'center',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'space-between'
                 }}>
-                  <Monitor size={24} color="#0056B3" style={{ margin: '0 auto 6px auto' }} />
-                  <div style={{ fontWeight: 700, fontSize: 13, color: '#1E293B' }}>Máy tính (PC)</div>
-                  <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>
+                  <div>
+                    <Monitor size={24} color="#0056B3" style={{ margin: '0 auto 6px auto' }} />
+                    <div style={{ fontWeight: 700, fontSize: 13, color: '#1E293B' }}>Máy tính (PC)</div>
+                    <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>
+                      {myDevices.pc ? (
+                        <span style={{ color: myDevices.pc.approvalStatus === 'APPROVED' ? '#16A34A' : '#D97706', fontWeight: 600 }}>
+                          {myDevices.pc.deviceName}
+                        </span>
+                      ) : (
+                        'Chưa đăng ký'
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 8 }}>
                     {myDevices.pc ? (
-                      <span style={{ color: myDevices.pc.approvalStatus === 'APPROVED' ? '#16A34A' : '#D97706', fontWeight: 600 }}>
-                        {myDevices.pc.deviceName} ({myDevices.pc.approvalStatus})
+                      <span style={{ fontSize: 11, color: '#16A34A', fontWeight: 700 }}>✓ Đã liên kết</span>
+                    ) : isCurrentClientMobile ? (
+                      <span style={{ fontSize: 10, color: '#64748B', backgroundColor: '#F1F5F9', padding: '2px 6px', borderRadius: 4 }}>
+                        🔒 Chỉ xem trạng thái
                       </span>
                     ) : (
-                      'Chưa đăng ký'
+                      <button
+                        onClick={() => openRegisterDeviceModal('PC')}
+                        style={{
+                          backgroundColor: '#0056B3',
+                          color: '#FFF',
+                          border: 'none',
+                          borderRadius: 6,
+                          padding: '4px 10px',
+                          fontSize: 11,
+                          fontWeight: 700,
+                          cursor: 'pointer'
+                        }}
+                      >
+                        Đăng ký máy này
+                      </button>
                     )}
                   </div>
                 </div>
@@ -1641,8 +1887,26 @@ export const EmployeePortalView: React.FC = () => {
               <X size={20} style={{ cursor: 'pointer' }} onClick={() => setShowRegisterModal(false)} />
             </div>
 
-            <div style={{ fontSize: 13, color: '#64748B', marginBottom: 14, lineHeight: 1.4 }}>
-              Hệ thống tự động phát hiện mã phần cứng và liên kết với tài khoản của <strong>{user?.fullName || 'nhân viên'}</strong>.
+            {/* Banner tự động nhận diện thiết bị */}
+            <div style={{
+              backgroundColor: isCurrentClientMobile ? '#EFF6FF' : '#F0FDF4',
+              border: `1px solid ${isCurrentClientMobile ? '#BFDBFE' : '#BBF7D0'}`,
+              borderRadius: 8,
+              padding: '10px 12px',
+              fontSize: 12,
+              color: isCurrentClientMobile ? '#1E40AF' : '#166534',
+              marginBottom: 14,
+              lineHeight: 1.4
+            }}>
+              {isCurrentClientMobile ? (
+                <div>
+                  📱 <strong>Đang truy cập trên Điện thoại (Mobile):</strong> Hệ thống tự động nhận diện phần cứng và <strong>chỉ cho phép đăng ký khe Mobile</strong>. Khe Máy tính (PC) chỉ hiển thị trạng thái và phải được đăng ký trực tiếp trên máy tính.
+                </div>
+              ) : (
+                <div>
+                  💻 <strong>Đang truy cập trên Máy tính (PC):</strong> Hệ thống tự động nhận diện phần cứng và <strong>chỉ cho phép đăng ký khe PC</strong>. Đã khóa đăng ký khe Mobile để tránh gán nhầm thiết bị.
+                </div>
+              )}
             </div>
 
             <div style={{ marginBottom: 14 }}>
@@ -1650,37 +1914,47 @@ export const EmployeePortalView: React.FC = () => {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <button
                   type="button"
+                  disabled={!isCurrentClientMobile}
                   onClick={() => {
-                    setRegisteringDeviceType('MOBILE');
-                    setDeviceNameInput(`Mobile - ${user?.fullName || 'Nhân viên'}`);
+                    if (isCurrentClientMobile) {
+                      setRegisteringDeviceType('MOBILE');
+                      setDeviceNameInput(`Mobile - ${user?.fullName || 'Nhân viên'}`);
+                    }
                   }}
+                  title={!isCurrentClientMobile ? 'Đã khóa trên PC. Vui lòng mở điện thoại để đăng ký.' : ''}
                   style={{
                     padding: '10px',
                     borderRadius: 8,
                     border: registeringDeviceType === 'MOBILE' ? '2px solid #0056B3' : '1px solid #CBD5E1',
                     backgroundColor: registeringDeviceType === 'MOBILE' ? '#EFF6FF' : '#FFF',
                     fontWeight: 700,
-                    cursor: 'pointer'
+                    cursor: !isCurrentClientMobile ? 'not-allowed' : 'pointer',
+                    opacity: !isCurrentClientMobile ? 0.45 : 1
                   }}
                 >
-                  📱 Điện thoại (Mobile)
+                  📱 Mobile {!isCurrentClientMobile && '(Khóa)'}
                 </button>
                 <button
                   type="button"
+                  disabled={isCurrentClientMobile}
                   onClick={() => {
-                    setRegisteringDeviceType('PC');
-                    setDeviceNameInput(`PC - ${user?.fullName || 'Nhân viên'}`);
+                    if (!isCurrentClientMobile) {
+                      setRegisteringDeviceType('PC');
+                      setDeviceNameInput(`PC - ${user?.fullName || 'Nhân viên'}`);
+                    }
                   }}
+                  title={isCurrentClientMobile ? 'Đã khóa trên Điện thoại. Chỉ hiển thị trạng thái, cần đăng ký trên PC.' : ''}
                   style={{
                     padding: '10px',
                     borderRadius: 8,
                     border: registeringDeviceType === 'PC' ? '2px solid #0056B3' : '1px solid #CBD5E1',
                     backgroundColor: registeringDeviceType === 'PC' ? '#EFF6FF' : '#FFF',
                     fontWeight: 700,
-                    cursor: 'pointer'
+                    cursor: isCurrentClientMobile ? 'not-allowed' : 'pointer',
+                    opacity: isCurrentClientMobile ? 0.45 : 1
                   }}
                 >
-                  💻 Máy tính (PC)
+                  💻 Máy tính (PC) {isCurrentClientMobile && '(Khóa)'}
                 </button>
               </div>
             </div>

@@ -1,15 +1,16 @@
 import React, { useState } from 'react';
 import { Period, InspectionReport } from '../../types';
 import { api } from '../../api/client';
-import { Upload, FileSpreadsheet, CheckCircle2, AlertTriangle, AlertCircle, ArrowRight, UserX, Clock, Smartphone, Zap, Sparkles, RefreshCw } from 'lucide-react';
+import { Upload, FileSpreadsheet, CheckCircle2, AlertCircle, ArrowRight, UserX, Clock, Smartphone, Zap, RefreshCw } from 'lucide-react';
 
 interface Step1ImportProps {
   period: Period;
   onImportSuccess: () => void;
   onNextStep: () => void;
+  onGoToStep?: (step: number) => void;
 }
 
-export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSuccess, onNextStep }) => {
+export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSuccess, onNextStep, onGoToStep }) => {
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [inspecting, setInspecting] = useState(false);
@@ -32,6 +33,14 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
       const res = await api.post(`/periods/${period.id}/sync-self-attendance`);
       setSyncResult(res.data);
       onImportSuccess();
+      // Tự động chuyển thẳng sang Bước 3 (Bảng tính công) để HR thấy ngay dữ liệu đã tính mà không cần thao tác thêm
+      setTimeout(() => {
+        if (onGoToStep) {
+          onGoToStep(3);
+        } else {
+          onNextStep();
+        }
+      }, 700);
     } catch (err: any) {
       console.error('❌ [Sync Self Attendance] Error:', err);
       const data = err.response?.data;
@@ -86,7 +95,6 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
     formData.append('file', file);
 
     try {
-      // commit = false: chỉ kiểm tra và đối chiếu
       const res = await api.post<InspectionReport>(`/periods/${period.id}/import-punches?commit=false`, formData);
       setReport(res.data);
     } catch (err: any) {
@@ -108,7 +116,6 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
     formData.append('file', file);
 
     try {
-      // commit = true: lưu dữ liệu thô vào hệ thống
       await api.post(`/periods/${period.id}/import-punches?commit=true`, formData);
       onImportSuccess();
       onNextStep();
@@ -125,21 +132,23 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
   const isClosed = period.status === 'Closed';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-      {/* PHƯƠNG THỨC 1: ĐỒNG BỘ TỪ DỮ LIỆU TỰ CHẤM CÔNG (WEB & MOBILE PWA) */}
-      <div className="card" style={{ border: '2px solid #E0E7FF', backgroundColor: '#FFFFFF', boxShadow: '0 4px 12px rgba(99, 102, 241, 0.08)' }}>
-        <div className="card-header" style={{ backgroundColor: '#F5F7FF', borderBottom: '1px solid #E0E7FF', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+      {/* KHỐI 1: TỔNG HỢP & TÍNH CÔNG DỮ LIỆU TỰ ĐỘNG */}
+      <div className="card" style={{ border: '1px solid #E2E8F0', backgroundColor: '#FFFFFF', boxShadow: '0 2px 8px rgba(0,0,0,0.04)' }}>
+        <div className="card-header" style={{ backgroundColor: '#F8FAFC', borderBottom: '1px solid #E2E8F0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div style={{ backgroundColor: '#4F46E5', color: '#FFF', padding: '6px', borderRadius: '8px', display: 'flex' }}>
-              <Smartphone size={20} />
+            <div style={{ backgroundColor: '#0056B3', color: '#FFF', padding: '6px', borderRadius: '8px', display: 'flex' }}>
+              <Smartphone size={18} />
             </div>
             <div>
-              <span style={{ fontSize: '16px', fontWeight: 800, color: '#312E81' }}>Cách 1: Chấm công từ Dữ liệu Tự Chấm Công (Web & Mobile PWA)</span>
-              <div style={{ fontSize: '12px', color: '#6366F1', fontWeight: 600 }}>Tự động quét toàn bộ lượt quẹt thẻ trực tuyến hợp lệ của nhân viên trong kỳ</div>
+              <span style={{ fontSize: '15px', fontWeight: 800, color: '#0F172A' }}>Dữ liệu Chấm công Kỳ {String(period.month).padStart(2, '0')}/{period.year}</span>
+              <div style={{ fontSize: '12px', color: '#64748B', fontWeight: 500 }}>
+                Khoảng thời gian: {new Date(period.fromDate).toLocaleDateString('vi-VN')} — {new Date(period.toDate).toLocaleDateString('vi-VN')}
+              </div>
             </div>
           </div>
-          <span className="badge" style={{ backgroundColor: '#EEF2FF', color: '#4338CA', border: '1px solid #C7D2FE', fontWeight: 700 }}>
-            ⭐ Khuyên dùng (1 chạm)
+          <span className="badge badge-neutral" style={{ whiteSpace: 'nowrap', fontWeight: 700 }}>
+            {isClosed ? 'Kỳ đã chốt' : 'Đang xử lý'}
           </span>
         </div>
 
@@ -152,7 +161,7 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
               color: 'var(--neutral-600)',
               textAlign: 'center'
             }}>
-              Kỳ công đã chốt. Để đồng bộ lại, Quản trị viên cần thực hiện mở chốt kỳ công.
+              Kỳ công đã chốt. Để tính công lại, Quản trị viên cần thực hiện mở chốt kỳ công.
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -167,43 +176,44 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
                 borderRadius: '12px',
                 border: '1px solid #E2E8F0'
               }}>
-                <div style={{ maxWidth: '600px' }}>
+                <div style={{ maxWidth: '640px' }}>
                   <div style={{ fontSize: '14px', fontWeight: 700, color: '#1E293B', marginBottom: '4px' }}>
-                    Tự động đồng bộ & tính công cho kỳ {String(period.month).padStart(2, '0')}/{period.year}
+                    Tổng hợp dữ liệu chấm công từ thiết bị của nhân viên
                   </div>
                   <div style={{ fontSize: '13px', color: '#64748B', lineHeight: '1.5' }}>
-                    Hệ thống sẽ lấy tất cả dữ liệu chấm công trực tuyến (Vào/Ra) hợp lệ đã qua kiểm tra vị trí GPS, Wi-Fi và các đơn giải trình đã duyệt của nhân viên trong kỳ ({new Date(period.fromDate).toLocaleDateString('vi-VN')} - {new Date(period.toDate).toLocaleDateString('vi-VN')}) để tự động đưa vào bảng tính công.
+                    Hệ thống tự động thu thập toàn bộ lượt điểm danh (Vào/Ra) hợp lệ từ máy tính PC và điện thoại Mobile của nhân viên trong kỳ, cùng các đơn giải trình đã được HCNS phê duyệt.
                   </div>
                 </div>
 
                 <button
+                  type="button"
                   onClick={handleSyncSelfAttendance}
                   disabled={syncingSelf || committing || inspecting}
                   style={{
                     display: 'inline-flex',
                     alignItems: 'center',
                     gap: '8px',
-                    padding: '12px 24px',
-                    borderRadius: '10px',
-                    backgroundColor: syncingSelf ? '#818CF8' : '#4F46E5',
+                    padding: '10px 22px',
+                    borderRadius: '8px',
+                    backgroundColor: syncingSelf ? '#93C5FD' : '#0056B3',
                     color: '#FFFFFF',
                     border: 'none',
                     fontWeight: 700,
-                    fontSize: '14px',
+                    fontSize: '13px',
                     cursor: syncingSelf ? 'wait' : 'pointer',
-                    boxShadow: '0 4px 12px rgba(79, 70, 229, 0.3)',
-                    transition: 'all 0.2s ease'
+                    boxShadow: '0 2px 6px rgba(0, 86, 179, 0.25)',
+                    whiteSpace: 'nowrap'
                   }}
                 >
                   {syncingSelf ? (
                     <>
-                      <RefreshCw size={18} className="animate-spin" />
-                      <span>Đang đồng bộ & tính công...</span>
+                      <RefreshCw size={16} className="animate-spin" />
+                      <span style={{ whiteSpace: 'nowrap' }}>Đang tổng hợp & tính công...</span>
                     </>
                   ) : (
                     <>
-                      <Zap size={18} />
-                      <span>⚡ Đồng bộ & Tính công ngay</span>
+                      <Zap size={16} />
+                      <span style={{ whiteSpace: 'nowrap' }}>⚡ 1-Chạm: Tổng hợp & Tính công ngay</span>
                     </>
                   )}
                 </button>
@@ -214,28 +224,42 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
+                  flexWrap: 'wrap',
+                  gap: '12px',
                   padding: '14px 18px',
                   backgroundColor: '#ECFDF5',
                   border: '1px solid #A7F3D0',
-                  borderRadius: '10px',
+                  borderRadius: '8px',
                   color: '#065F46',
                   fontSize: '13px'
                 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                    <CheckCircle2 size={20} color="#059669" />
+                    <CheckCircle2 size={18} color="#059669" />
                     <div>
-                      <strong>Đồng bộ thành công: </strong>
+                      <strong>Đã tổng hợp & tính công thành công! </strong>
                       {syncResult.message}
                     </div>
                   </div>
-                  <button
-                    onClick={onNextStep}
-                    className="btn btn-sm btn-primary"
-                    style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
-                  >
-                    <span>Sang Bước 2: Kiểm tra & Giải trình</span>
-                    <ArrowRight size={14} />
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <button
+                      type="button"
+                      onClick={() => onGoToStep ? onGoToStep(3) : onNextStep()}
+                      className="btn btn-sm btn-primary"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
+                      title="Mở trực tiếp lưới Bảng tính công đã tính toán"
+                    >
+                      <span>👉 Mở ngay Bảng Chấm Công (Bước 3)</span>
+                      <ArrowRight size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onNextStep}
+                      className="btn btn-sm btn-secondary"
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
+                    >
+                      <span>Rà soát cảnh báo (Bước 2)</span>
+                    </button>
+                  </div>
                 </div>
               )}
             </div>
@@ -243,14 +267,14 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
         </div>
       </div>
 
-      {/* PHƯƠNG THỨC 2: NẠP FILE EXCEL MÁY CHẤM CÔNG (MYTIME) */}
+      {/* KHỐI 2: NẠP BỔ SUNG FILE MÁY CHẤM CÔNG (TÙY CHỌN GỘP DỮ LIỆU) */}
       <div className="card">
         <div className="card-header">
           <div className="card-title" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <FileSpreadsheet size={18} color="var(--primary)" />
-            <span>Cách 2: Nạp file Excel máy chấm công truyền thống (MyTime)</span>
+            <span>Nạp bổ sung từ file máy chấm công (Tùy chọn)</span>
           </div>
-          <span className="badge badge-neutral">Kỳ: {String(period.month).padStart(2, '0')}/{period.year} ({new Date(period.fromDate).toLocaleDateString('vi-VN')} - {new Date(period.toDate).toLocaleDateString('vi-VN')})</span>
+          <span className="badge badge-neutral" style={{ whiteSpace: 'nowrap' }}>Tự động gộp dữ liệu</span>
         </div>
 
         <div className="card-body">
@@ -274,11 +298,10 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
                 style={{
                   border: isDragging ? '2px dashed var(--primary)' : '2px dashed var(--neutral-300)',
                   borderRadius: 'var(--radius-lg)',
-                  padding: '36px 20px',
+                  padding: '28px 20px',
                   textAlign: 'center',
                   backgroundColor: isDragging ? '#eff6ff' : (file ? 'var(--primary-light)' : 'var(--neutral-50)'),
                   cursor: 'pointer',
-                  transform: isDragging ? 'scale(1.01)' : 'none',
                   transition: 'all 0.2s ease'
                 }}
                 onClick={() => document.getElementById('punchFileInput')?.click()}
@@ -290,12 +313,12 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
                   style={{ display: 'none' }}
                   onChange={handleFileChange}
                 />
-                <Upload size={36} color={isDragging || file ? 'var(--primary)' : 'var(--neutral-400)'} style={{ margin: '0 auto 12px' }} />
-                <div style={{ fontWeight: 700, fontSize: '15px', color: 'var(--neutral-800)', marginBottom: '4px' }}>
+                <Upload size={32} color={isDragging || file ? 'var(--primary)' : 'var(--neutral-400)'} style={{ margin: '0 auto 10px' }} />
+                <div style={{ fontWeight: 700, fontSize: '14px', color: 'var(--neutral-800)', marginBottom: '4px', whiteSpace: 'nowrap' }}>
                   {file ? file.name : (isDragging ? 'Thả file Excel vào đây...' : 'Kéo thả hoặc nhấp để chọn file Excel chấm công (.xlsx, .xls)')}
                 </div>
                 <div style={{ fontSize: '12px', color: 'var(--neutral-500)' }}>
-                  {file ? `Dung lượng: ${(file.size / 1024).toFixed(1)} KB` : 'Định dạng file xuất từ phần mềm chấm công (các cột: Mã NV, Tên NV, Ngày công MM/dd/yyyy, Vào, Ra...)'}
+                  {file ? `Dung lượng: ${(file.size / 1024).toFixed(1)} KB` : 'Dành cho bổ sung lượt quẹt từ máy chấm công. Hệ thống sẽ tự động gộp chung với dữ liệu từ thiết bị.'}
                 </div>
               </div>
 
@@ -317,20 +340,24 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
 
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
                 <button
+                  type="button"
                   className="btn btn-secondary"
                   onClick={handleInspect}
                   disabled={!file || inspecting || committing}
+                  style={{ whiteSpace: 'nowrap' }}
                 >
                   {inspecting ? 'Đang đọc & kiểm tra...' : 'Kiểm tra & đối chiếu'}
                 </button>
 
                 <button
+                  type="button"
                   className="btn btn-primary"
                   onClick={handleCommit}
                   disabled={!file || committing || inspecting}
+                  style={{ whiteSpace: 'nowrap' }}
                 >
                   <CheckCircle2 size={16} />
-                  <span>{committing ? 'Đang lưu vào kỳ công...' : 'Xác nhận Nạp dữ liệu'}</span>
+                  <span style={{ whiteSpace: 'nowrap' }}>{committing ? 'Đang lưu vào kỳ công...' : 'Xác nhận Nạp & Gộp dữ liệu'}</span>
                 </button>
               </div>
             </div>
@@ -338,46 +365,44 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
         </div>
       </div>
 
-      {/* Báo cáo kiểm tra sau khi đọc file (Tính năng 2.1.4) */}
+      {/* Báo cáo kiểm tra sau khi đọc file */}
       {report && (
         <div className="card">
           <div className="card-header">
-            <div className="card-title">Báo cáo kết quả kiểm tra file</div>
+            <div className="card-title">Kết quả kiểm tra file</div>
             <div style={{ display: 'flex', gap: '8px' }}>
-              <span className="badge badge-success">Hợp lệ: {report.validRows} dòng</span>
-              {report.errorRows > 0 && <span className="badge badge-danger">Lỗi: {report.errorRows} dòng</span>}
-              {report.warningRows > 0 && <span className="badge badge-warning">Cảnh báo: {report.warningRows} dòng</span>}
+              <span className="badge badge-success" style={{ whiteSpace: 'nowrap' }}>Hợp lệ: {report.validRows} dòng</span>
+              {report.errorRows > 0 && <span className="badge badge-danger" style={{ whiteSpace: 'nowrap' }}>Lỗi: {report.errorRows} dòng</span>}
+              {report.warningRows > 0 && <span className="badge badge-warning" style={{ whiteSpace: 'nowrap' }}>Cảnh báo: {report.warningRows} dòng</span>}
             </div>
           </div>
 
           <div className="card-body">
-            {/* Thẻ thống kê nhanh */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '24px' }}>
-              <div style={{ padding: '16px', backgroundColor: 'var(--neutral-50)', borderRadius: 'var(--radius)', border: '1px solid var(--neutral-200)' }}>
-                <div style={{ fontSize: '12px', color: 'var(--neutral-500)', fontWeight: 600 }}>TỔNG SỐ DÒNG ĐỌC ĐƯỢC</div>
-                <div style={{ fontSize: '24px', fontWeight: 800, color: 'var(--neutral-900)' }}>{report.totalRows}</div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '20px' }}>
+              <div style={{ padding: '14px 16px', backgroundColor: 'var(--neutral-50)', borderRadius: 'var(--radius)', border: '1px solid var(--neutral-200)' }}>
+                <div style={{ fontSize: '11px', color: 'var(--neutral-500)', fontWeight: 700, textTransform: 'uppercase' }}>Tổng dòng đọc được</div>
+                <div style={{ fontSize: '22px', fontWeight: 800, color: 'var(--neutral-900)', marginTop: '2px' }}>{report.totalRows}</div>
               </div>
 
-              <div style={{ padding: '16px', backgroundColor: 'var(--success-light)', borderRadius: 'var(--radius)', border: '1px solid #bbf7d0' }}>
-                <div style={{ fontSize: '12px', color: 'var(--success-text)', fontWeight: 600 }}>NHÂN VIÊN KHỚP THÀNH CÔNG</div>
-                <div style={{ fontSize: '24px', fontWeight: 800, color: 'var(--success-text)' }}>{report.matchedEmployees}</div>
+              <div style={{ padding: '14px 16px', backgroundColor: 'var(--success-light)', borderRadius: 'var(--radius)', border: '1px solid #bbf7d0' }}>
+                <div style={{ fontSize: '11px', color: 'var(--success-text)', fontWeight: 700, textTransform: 'uppercase' }}>Nhân viên khớp</div>
+                <div style={{ fontSize: '22px', fontWeight: 800, color: 'var(--success-text)', marginTop: '2px' }}>{report.matchedEmployees}</div>
               </div>
 
-              <div style={{ padding: '16px', backgroundColor: report.unmatchedEmployees > 0 ? 'var(--warning-light)' : 'var(--neutral-50)', borderRadius: 'var(--radius)', border: '1px solid var(--neutral-200)' }}>
-                <div style={{ fontSize: '12px', color: report.unmatchedEmployees > 0 ? 'var(--warning-text)' : 'var(--neutral-500)', fontWeight: 600 }}>MÃ MÁY CHƯA KHỚP</div>
-                <div style={{ fontSize: '24px', fontWeight: 800, color: report.unmatchedEmployees > 0 ? 'var(--warning-text)' : 'var(--neutral-900)' }}>{report.unmatchedEmployees}</div>
+              <div style={{ padding: '14px 16px', backgroundColor: report.unmatchedEmployees > 0 ? 'var(--warning-light)' : 'var(--neutral-50)', borderRadius: 'var(--radius)', border: '1px solid var(--neutral-200)' }}>
+                <div style={{ fontSize: '11px', color: report.unmatchedEmployees > 0 ? 'var(--warning-text)' : 'var(--neutral-500)', fontWeight: 700, textTransform: 'uppercase' }}>Mã máy chưa khớp</div>
+                <div style={{ fontSize: '22px', fontWeight: 800, color: report.unmatchedEmployees > 0 ? 'var(--warning-text)' : 'var(--neutral-900)', marginTop: '2px' }}>{report.unmatchedEmployees}</div>
               </div>
 
-              <div style={{ padding: '16px', backgroundColor: 'var(--neutral-50)', borderRadius: 'var(--radius)', border: '1px solid var(--neutral-200)' }}>
-                <div style={{ fontSize: '12px', color: 'var(--neutral-500)', fontWeight: 600 }}>NV KHÔNG CÓ DỮ LIỆU MÁY</div>
-                <div style={{ fontSize: '24px', fontWeight: 800, color: 'var(--neutral-900)' }}>{report.missingPunchEmployees.length}</div>
+              <div style={{ padding: '14px 16px', backgroundColor: 'var(--neutral-50)', borderRadius: 'var(--radius)', border: '1px solid var(--neutral-200)' }}>
+                <div style={{ fontSize: '11px', color: 'var(--neutral-500)', fontWeight: 700, textTransform: 'uppercase' }}>NV không có trong file</div>
+                <div style={{ fontSize: '22px', fontWeight: 800, color: 'var(--neutral-900)', marginTop: '2px' }}>{report.missingPunchEmployees.length}</div>
               </div>
             </div>
 
-            {/* Cảnh báo mã máy chưa khớp */}
             {report.unmatchedMachineCodes.length > 0 && (
               <div style={{
-                padding: '14px 18px',
+                padding: '12px 16px',
                 backgroundColor: 'var(--warning-light)',
                 border: '1px solid #fde68a',
                 borderRadius: 'var(--radius)',
@@ -385,26 +410,22 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
                 marginBottom: '16px'
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700, marginBottom: '6px' }}>
-                  <UserX size={18} />
+                  <UserX size={16} />
                   <span>Các mã máy chấm công chưa được gán cho nhân viên:</span>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
                   {report.unmatchedMachineCodes.map((code) => (
-                    <span key={code} className="badge badge-warning" style={{ fontSize: '12px' }}>
+                    <span key={code} className="badge badge-warning" style={{ fontSize: '11px', whiteSpace: 'nowrap' }}>
                       Mã: {code}
                     </span>
                   ))}
                 </div>
-                <div style={{ fontSize: '12px', marginTop: '8px', color: 'var(--neutral-600)' }}>
-                  * Gợi ý: Bạn có thể vào "Danh mục nhân sự" để bổ sung mã máy này cho nhân viên tương ứng.
-                </div>
               </div>
             )}
 
-            {/* Cảnh báo nhân viên trong danh mục nhưng không quẹt */}
             {report.missingPunchEmployees.length > 0 && (
               <div style={{
-                padding: '14px 18px',
+                padding: '12px 16px',
                 backgroundColor: 'var(--neutral-100)',
                 border: '1px solid var(--neutral-300)',
                 borderRadius: 'var(--radius)',
@@ -412,12 +433,12 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
                 marginBottom: '16px'
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700, marginBottom: '6px' }}>
-                  <Clock size={18} />
-                  <span>Nhân viên có trong danh mục nhưng không có lần quẹt nào trong file:</span>
+                  <Clock size={16} />
+                  <span>Nhân viên có trong danh mục nhưng không xuất hiện trong file:</span>
                 </div>
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
                   {report.missingPunchEmployees.map((name) => (
-                    <span key={name} className="badge badge-neutral" style={{ fontSize: '11px' }}>
+                    <span key={name} className="badge badge-neutral" style={{ fontSize: '11px', whiteSpace: 'nowrap' }}>
                       {name}
                     </span>
                   ))}
@@ -425,10 +446,9 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
               </div>
             )}
 
-            {/* Danh sách lỗi dòng nếu có */}
             {report.errors.length > 0 && (
               <div style={{
-                padding: '14px 18px',
+                padding: '12px 16px',
                 backgroundColor: 'var(--danger-light)',
                 border: '1px solid #fecaca',
                 borderRadius: 'var(--radius)',

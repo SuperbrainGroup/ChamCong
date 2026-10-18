@@ -162,6 +162,7 @@ export const attendanceApi = {
     gpsError?: string;
     channel: 'MOBILE_PWA' | 'PC_WEB';
     macAddress?: string;
+    punchType?: 'AUTO' | 'CHECK_IN' | 'CHECK_OUT';
   }) => {
     const res = await api.post('/v1/attendance/punch', payload);
     return res.data;
@@ -187,6 +188,7 @@ export const attendanceApi = {
     reviewState?: string;
     employeeCode?: string;
     onlyValid?: boolean;
+    onlyInvalid?: boolean;
     limit?: number;
   }) => {
     const res = await api.get('/v1/hr/punches', { params });
@@ -205,6 +207,11 @@ export const attendanceApi = {
 
   deletePunch: async (id: number) => {
     const res = await api.delete(`/v1/hr/punches/${id}`);
+    return res.data;
+  },
+
+  deletePunchesByRange: async (params: { fromDate: string; toDate: string; branch?: string; companyId?: number }) => {
+    const res = await api.delete('/v1/hr/punches/by-range', { params });
     return res.data;
   }
 };
@@ -443,6 +450,35 @@ export const platformApi = {
     const formData = new FormData();
     formData.append('file', file);
     const res = await api.post('/platform/favicon', formData);
+    return res.data;
+  }
+};
+
+// --- 10. CA LÀM VIỆC HỘI SỞ (SHIFT HOURS API) ---
+export interface ShiftHoursData {
+  shiftStart: string;
+  shiftEnd: string;
+  lunchStart: string;
+  lunchMinutes: number;
+  checkoutPrepareMinutes: number;
+  checkoutStartTime: string;
+  standardHoursRange: string;
+  companyName: string;
+}
+
+export const shiftHoursApi = {
+  get: async (companyId: number): Promise<ShiftHoursData> => {
+    const res = await api.get(`/companies/${companyId}/shift-hours`);
+    return res.data;
+  },
+  save: async (companyId: number, data: {
+    shiftStart: string;
+    shiftEnd: string;
+    lunchStart?: string;
+    lunchMinutes?: number;
+    checkoutPrepareMinutes?: number;
+  }): Promise<{ message: string }> => {
+    const res = await api.post(`/companies/${companyId}/shift-hours`, data);
     return res.data;
   }
 };

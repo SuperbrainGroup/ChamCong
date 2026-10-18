@@ -9,7 +9,7 @@ namespace ChamCong.Api.Controllers;
 
 [ApiController]
 [Route("api/companies/{companyId}/leave")]
-[Authorize]
+[Authorize(Policy = "RequireHR")]
 public class LeaveController : ControllerBase
 {
     private readonly AppDbContext _db;
@@ -148,7 +148,10 @@ public class LeaveController : ControllerBase
         using var workbook = new XLWorkbook(stream);
         var ws = workbook.Worksheets.First();
 
-        var emps = await _db.Employees.AsNoTracking().Where(e => e.CompanyId == companyId).ToDictionaryAsync(e => e.EmployeeCode, StringComparer.OrdinalIgnoreCase, ct);
+        var empList = await _db.Employees.AsNoTracking().Where(e => e.CompanyId == companyId).ToListAsync(ct);
+        var emps = empList
+            .GroupBy(e => e.EmployeeCode, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
         var codes = (await _db.AttendanceCodes.AsNoTracking().Where(c => c.CompanyId == companyId).Select(c => c.Code).ToListAsync(ct)).ToHashSet();
 
         int importedCount = 0;

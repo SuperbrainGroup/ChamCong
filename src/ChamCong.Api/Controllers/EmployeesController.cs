@@ -9,6 +9,7 @@ using Microsoft.EntityFrameworkCore;
 namespace ChamCong.Api.Controllers;
 
 [ApiController]
+[Route("api/v1/companies/{companyId}/employees")]
 [Route("api/companies/{companyId}/employees")]
 [Authorize]
 public class EmployeesController : ControllerBase
@@ -83,9 +84,12 @@ public class EmployeesController : ControllerBase
         var grps = await _db.EmployeeGroups.AsNoTracking().Where(g => g.CompanyId == companyId).ToDictionaryAsync(g => g.Id, g => g.Name, ct);
 
         var codes = emps.Select(e => e.EmployeeCode).ToList();
-        var userMap = await _db.Users.AsNoTracking()
-            .Where(u => u.EmployeeCode != null && codes.Contains(u.EmployeeCode))
-            .ToDictionaryAsync(u => u.EmployeeCode!, u => u.Username, ct);
+        var userList = await _db.Users.AsNoTracking()
+            .Where(u => u.EmployeeCode != null && codes.Contains(u.EmployeeCode) && u.Companies.Any(c => c.CompanyId == companyId))
+            .ToListAsync(ct);
+        var userMap = userList
+            .GroupBy(u => u.EmployeeCode!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First().Username, StringComparer.OrdinalIgnoreCase);
 
         var list = emps.Select(e => new EmployeeDto(
             e.Id,
@@ -120,7 +124,7 @@ public class EmployeesController : ControllerBase
         var depts = await _db.Departments.AsNoTracking().Where(d => d.CompanyId == companyId).ToDictionaryAsync(d => d.Id, d => d.Name, ct);
         var grps = await _db.EmployeeGroups.AsNoTracking().Where(g => g.CompanyId == companyId).ToDictionaryAsync(g => g.Id, g => g.Name, ct);
 
-        var u = await _db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.EmployeeCode == e.EmployeeCode, ct);
+        var u = await _db.Users.AsNoTracking().FirstOrDefaultAsync(x => x.EmployeeCode == e.EmployeeCode && x.Companies.Any(c => c.CompanyId == companyId), ct);
 
         return Ok(new EmployeeDto(
             e.Id, e.CompanyId, e.EmployeeCode, e.FullName,
@@ -369,6 +373,64 @@ public class EmployeesController : ControllerBase
         await _db.SaveChangesAsync(ct);
 
         return Ok(new { message = "Đã xóa nhân viên." });
+    }
+
+    public record TerminateEmployeeDto(DateTime EndDate, string? Reason);
+
+    /// <summary>Cho nhân viên nghỉ việc: thiết lập Ngày nghỉ việc mà không xóa dữ liệu chấm công.</summary>
+    [HttpPost("{id}/terminate")]
+    public async Task<IActionResult> Terminate(int companyId, int id, [FromBody] TerminateEmployeeDto dto, CancellationToken ct)
+    {
+        _access.EnsureHR();
+        await _access.EnsureCompanyAsync(companyId, ct);
+        var emp = await _db.Employees.FirstOrDefaultAsync(e => e.Id == id && e.CompanyId == companyId, ct);
+        if (emp == null) return NotFound();
+
+        emp.EndDate = dto.EndDate.Date;
+        _audit.Log("Employee", emp.Id, "Terminate", new { endDate = dto.EndDate.Date, reason = dto.Reason }, companyId: companyId);
+        await _db.SaveChangesAsync(ct);
+
+        return Ok(new { message = $"Đã thiết lập ngày nghỉ việc cho {emp.FullName} là {dto.EndDate:dd/MM/yyyy}." });
+    }
+
+    /// <summary>Xóa cưỡng bức nhân viên kể cả khi có dữ liệu chấm công (chỉ Admin). Xóa toàn bộ dữ liệu liên quan.</summary>
+    [HttpDelete("{id}/force")]
+    [Authorize(Roles = Roles.Admin)]
+    public async Task<IActionResult> ForceDelete(int companyId, int id, CancellationToken ct)
+    {
+        await _access.EnsureCompanyAsync(companyId, ct);
+        var emp = await _db.Employees.FirstOrDefaultAsync(e => e.Id == id && e.CompanyId == companyId, ct);
+        if (emp == null) return NotFound();
+
+        // Xóa toàn bộ dữ liệu chấm công liên quan
+        var dayResults = await _db.DayResults.Where(r => r.EmployeeId == id).ToListAsync(ct);
+        if (dayResults.Count > 0) _db.DayResults.RemoveRange(dayResults);
+
+        var rawPunches = await _db.RawPunches.Where(p => p.EmployeeId == id).ToListAsync(ct);
+        if (rawPunches.Count > 0) _db.RawPunches.RemoveRange(rawPunches);
+
+        var funds = await _db.LeaveFunds.Where(f => f.EmployeeId == id).ToListAsync(ct);
+        if (funds.Count > 0) _db.LeaveFunds.RemoveRange(funds);
+
+        var ledger = await _db.LeaveLedger.Where(l => l.EmployeeId == id).ToListAsync(ct);
+        if (ledger.Count > 0) _db.LeaveLedger.RemoveRange(ledger);
+
+        var requests = await _db.LeaveRequests.Where(r => r.EmployeeId == id).ToListAsync(ct);
+        if (requests.Count > 0) _db.LeaveRequests.RemoveRange(requests);
+
+        var notes = await _db.PeriodNotes.Where(n => n.EmployeeId == id).ToListAsync(ct);
+        if (notes.Count > 0) _db.PeriodNotes.RemoveRange(notes);
+
+        var backups = await _db.DayResultManualBackups.Where(b => b.EmployeeId == id).ToListAsync(ct);
+        if (backups.Count > 0) _db.DayResultManualBackups.RemoveRange(backups);
+
+        _db.Employees.Remove(emp);
+        _audit.Log("Employee", emp.Id, "ForceDelete",
+            $"Xóa cưỡng bức nhân viên {emp.EmployeeCode} - {emp.FullName} ({dayResults.Count} ngày công, {rawPunches.Count} raw punches)",
+            companyId: companyId);
+        await _db.SaveChangesAsync(ct);
+
+        return Ok(new { message = $"Đã xóa hoàn toàn nhân viên {emp.FullName} cùng {dayResults.Count} bản ghi chấm công." });
     }
 
     [HttpGet("template-excel")]

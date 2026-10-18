@@ -232,8 +232,24 @@ public class PeriodsController : ControllerBase
     public async Task<IActionResult> Calculate(int id, [FromQuery] bool resetManual = false, CancellationToken ct = default)
     {
         _access.EnsureOperatorOrAdmin();
+        var period = await _access.GetPeriodAsync(id, ct: ct);
+        if (period.Status == PeriodStatus.Closed)
+        {
+            return BadRequest(new { message = "Kỳ công đã chốt, không thể tính lại." });
+        }
+
+        // Tự động đồng bộ và gộp dữ liệu chấm công từ thiết bị cá nhân (PC/Mobile) trước khi tính
+        var syncStats = await SyncDeviceAttendanceInternalAsync(period, ct);
+
         var result = await _calcService.CalculatePeriodAsync(id, resetManual, ct);
-        return Ok(result);
+        return Ok(new
+        {
+            message = $"Đã tự động lấy dữ liệu chấm công thiết bị ({syncStats.syncedDays} lượt công) và tính công thành công.",
+            syncedCount = syncStats.syncedDays,
+            employeesWithPunches = syncStats.employeesWithPunches,
+            totalEmployees = syncStats.totalEmployees,
+            calculationResult = result
+        });
     }
 
     /// <summary>HCNS đồng bộ dữ liệu tự chấm công (Web/Mobile PWA) của nhân viên vào kỳ công và tính công tự động.</summary>
@@ -247,6 +263,30 @@ public class PeriodsController : ControllerBase
             return BadRequest(new { message = "Kỳ công đã chốt, không thể đồng bộ dữ liệu mới." });
         }
 
+        var (syncedCount, employeesWithPunches, totalEmployees) = await SyncDeviceAttendanceInternalAsync(period, ct);
+
+        // Tự động chạy tính công cho kỳ
+        var calcResult = await _calcService.CalculatePeriodAsync(id, resetManual: false, ct);
+
+        _audit.Log("Period", id, "SyncSelfAttendance", new
+        {
+            SyncedDays = syncedCount,
+            EmployeesWithPunches = employeesWithPunches,
+            TotalEmployees = totalEmployees
+        }, companyId: period.CompanyId, periodId: id);
+
+        return Ok(new
+        {
+            message = $"Đã tự động tổng hợp {syncedCount} lượt ngày công thiết bị ({employeesWithPunches} nhân viên) và hoàn tất tính công.",
+            syncedCount,
+            employeesWithPunches,
+            totalEmployees,
+            calculationResult = calcResult
+        });
+    }
+
+    private async Task<(int syncedDays, int employeesWithPunches, int totalEmployees)> SyncDeviceAttendanceInternalAsync(Period period, CancellationToken ct)
+    {
         var employees = await _db.Employees
             .AsNoTracking()
             .Where(e => e.CompanyId == period.CompanyId)
@@ -254,28 +294,34 @@ public class PeriodsController : ControllerBase
 
         if (!employees.Any())
         {
-            return BadRequest(new { message = "Không tìm thấy nhân viên nào thuộc cơ sở/công ty này." });
+            return (0, 0, 0);
         }
 
         var empCodes = employees.Select(e => e.EmployeeCode).ToList();
 
-        // 1. Tải tất cả DailyPunchSummary trong kỳ (đã có In/Out chuẩn, tính cả giải trình)
-        var summaries = await _db.DailyPunchSummaries
+        // 1. Tải tất cả TimeAdjustments đã duyệt trong kỳ (Đơn giải trình chấm công)
+        var adjustments = await _db.TimeAdjustments
             .AsNoTracking()
-            .Where(s => empCodes.Contains(s.EmployeeCode) && s.WorkDate >= period.FromDate && s.WorkDate <= period.ToDate)
+            .Where(a => (a.CompanyId == null || a.CompanyId == period.CompanyId) && empCodes.Contains(a.EmployeeCode) && a.WorkDate >= period.FromDate && a.WorkDate <= period.ToDate && a.IsActive)
             .ToListAsync(ct);
 
-        // 2. Tải tất cả WebAttendanceLogs hợp lệ trong kỳ phòng trường hợp chưa có summary
+        // 2. Tải tất cả DailyPunchSummary trong kỳ (đã có In/Out chuẩn, tính cả giải trình)
+        var summaries = await _db.DailyPunchSummaries
+            .AsNoTracking()
+            .Where(s => s.CompanyId == period.CompanyId && empCodes.Contains(s.EmployeeCode) && s.WorkDate >= period.FromDate && s.WorkDate <= period.ToDate)
+            .ToListAsync(ct);
+
+        // 3. Tải tất cả WebAttendanceLogs hợp lệ trong kỳ phòng trường hợp chưa có summary
         var validLogs = await _db.WebAttendanceLogs
             .AsNoTracking()
-            .Where(l => empCodes.Contains(l.EmployeeCode) && l.WorkDate >= period.FromDate && l.WorkDate <= period.ToDate &&
+            .Where(l => (l.CompanyId == null || l.CompanyId == period.CompanyId) && empCodes.Contains(l.EmployeeCode) && l.WorkDate >= period.FromDate && l.WorkDate <= period.ToDate &&
                         (l.VerificationStatus == "VALID" || l.ReviewState == "ACCEPTED"))
             .OrderBy(l => l.CheckTimeUtc)
             .ToListAsync(ct);
 
-        // 3. Tải các bản ghi RawPunch hiện tại của kỳ
+        // 4. Tải các bản ghi RawPunch hiện tại của kỳ
         var existingRaws = await _db.RawPunches
-            .Where(r => r.PeriodId == id)
+            .Where(r => r.PeriodId == period.Id)
             .ToListAsync(ct);
 
         var rawDict = existingRaws
@@ -298,28 +344,39 @@ public class PeriodsController : ControllerBase
                 TimeSpan? outTime = null;
                 string source = "APP";
 
-                // Ưu tiên DailyPunchSummary
-                var sum = summaries.FirstOrDefault(s => s.EmployeeCode == emp.EmployeeCode && s.WorkDate.Date == date);
-                if (sum != null && (sum.InTime.HasValue || sum.OutTime.HasValue))
+                // Ưu tiên 1: Đơn giải trình chấm công đã duyệt (TimeAdjustment)
+                var adj = adjustments.FirstOrDefault(a => a.EmployeeCode == emp.EmployeeCode && a.WorkDate.Date == date);
+                if (adj != null)
                 {
-                    inTime = sum.InTime;
-                    outTime = sum.OutTime;
-                    source = sum.Source ?? "APP";
+                    inTime = adj.AdjInTime;
+                    outTime = adj.AdjOutTime;
+                    source = "REGULARIZED";
                 }
                 else
                 {
-                    // Nếu chưa có summary, tính từ WebAttendanceLogs
-                    var dayLogs = validLogs.Where(l => l.EmployeeCode == emp.EmployeeCode && l.WorkDate.Date == date).ToList();
-                    if (dayLogs.Any())
+                    // Ưu tiên 2: DailyPunchSummary
+                    var sum = summaries.FirstOrDefault(s => s.EmployeeCode == emp.EmployeeCode && s.WorkDate.Date == date);
+                    if (sum != null && (sum.InTime.HasValue || sum.OutTime.HasValue))
                     {
-                        var firstLog = dayLogs.First();
-                        inTime = AttendancePunchService.ToVietnamTime(firstLog.CheckTimeUtc).TimeOfDay;
-
-                        const double minWorkSpanMin = 30.0;
-                        var outCandidates = dayLogs.Where(l => (l.CheckTimeUtc - firstLog.CheckTimeUtc).TotalMinutes >= minWorkSpanMin).ToList();
-                        if (outCandidates.Any())
+                        inTime = sum.InTime;
+                        outTime = sum.OutTime;
+                        source = sum.Source ?? "APP";
+                    }
+                    else
+                    {
+                        // Ưu tiên 3: WebAttendanceLogs
+                        var dayLogs = validLogs.Where(l => l.EmployeeCode == emp.EmployeeCode && l.WorkDate.Date == date).ToList();
+                        if (dayLogs.Any())
                         {
-                            outTime = AttendancePunchService.ToVietnamTime(outCandidates.Last().CheckTimeUtc).TimeOfDay;
+                            var firstLog = dayLogs.First();
+                            inTime = AttendancePunchService.ToVietnamTime(firstLog.CheckTimeUtc).TimeOfDay;
+
+                            const double minWorkSpanMin = 30.0;
+                            var outCandidates = dayLogs.Where(l => (l.CheckTimeUtc - firstLog.CheckTimeUtc).TotalMinutes >= minWorkSpanMin).ToList();
+                            if (outCandidates.Any())
+                            {
+                                outTime = AttendancePunchService.ToVietnamTime(outCandidates.Last().CheckTimeUtc).TimeOfDay;
+                            }
                         }
                     }
                 }
@@ -329,23 +386,45 @@ public class PeriodsController : ControllerBase
                 empPunchedSet.Add(emp.Id);
                 short? inMin = inTime.HasValue ? (short?)(inTime.Value.Hours * 60 + inTime.Value.Minutes) : null;
                 short? outMin = outTime.HasValue ? (short?)(outTime.Value.Hours * 60 + outTime.Value.Minutes) : null;
-                string? inStr = inTime.HasValue ? inTime.Value.ToString(@"hh\:mm\:ss") : null;
-                string? outStr = outTime.HasValue ? outTime.Value.ToString(@"hh\:mm\:ss") : null;
 
                 if (rawDict.TryGetValue((emp.Id, date), out var raw))
                 {
-                    raw.InMin = inMin;
-                    raw.OutMin = outMin;
-                    raw.InTime = inStr;
-                    raw.OutTime = outStr;
-                    raw.Source = source;
+                    if (source == "REGULARIZED")
+                    {
+                        raw.InMin = inMin;
+                        raw.OutMin = outMin;
+                        raw.InTime = inMin.HasValue ? $"{(inMin.Value / 60):D2}:{(inMin.Value % 60):D2}:00" : null;
+                        raw.OutTime = outMin.HasValue ? $"{(outMin.Value / 60):D2}:{(outMin.Value % 60):D2}:00" : null;
+                        raw.Source = "REGULARIZED";
+                    }
+                    else
+                    {
+                        // Gộp thông minh nếu đã có punch trước đó (từ file hoặc lần sync trước)
+                        short? finalInMin = null;
+                        if (raw.InMin.HasValue && inMin.HasValue)
+                            finalInMin = Math.Min(raw.InMin.Value, inMin.Value);
+                        else
+                            finalInMin = inMin ?? raw.InMin;
+
+                        short? finalOutMin = null;
+                        if (raw.OutMin.HasValue && outMin.HasValue)
+                            finalOutMin = Math.Max(raw.OutMin.Value, outMin.Value);
+                        else
+                            finalOutMin = outMin ?? raw.OutMin;
+
+                        raw.InMin = finalInMin;
+                        raw.OutMin = finalOutMin;
+                        raw.InTime = finalInMin.HasValue ? $"{(finalInMin.Value / 60):D2}:{(finalInMin.Value % 60):D2}:00" : null;
+                        raw.OutTime = finalOutMin.HasValue ? $"{(finalOutMin.Value / 60):D2}:{(finalOutMin.Value % 60):D2}:00" : null;
+                        raw.Source = (raw.Source == "EXCEL" || raw.Source == "MERGED") ? "MERGED" : source;
+                    }
                     syncedCount++;
                 }
                 else
                 {
                     var newRaw = new RawPunch
                     {
-                        PeriodId = id,
+                        PeriodId = period.Id,
                         BatchId = null,
                         EmployeeId = emp.Id,
                         MachineCode = emp.EmployeeCode,
@@ -353,8 +432,8 @@ public class PeriodsController : ControllerBase
                         WorkDate = date,
                         InMin = inMin,
                         OutMin = outMin,
-                        InTime = inStr,
-                        OutTime = outStr,
+                        InTime = inMin.HasValue ? $"{(inMin.Value / 60):D2}:{(inMin.Value % 60):D2}:00" : null,
+                        OutTime = outMin.HasValue ? $"{(outMin.Value / 60):D2}:{(outMin.Value % 60):D2}:00" : null,
                         Source = source,
                         SourceRow = 0
                     };
@@ -366,25 +445,7 @@ public class PeriodsController : ControllerBase
         }
 
         await _db.SaveChangesAsync(ct);
-
-        // 4. Tự động chạy tính công cho kỳ
-        var calcResult = await _calcService.CalculatePeriodAsync(id, resetManual: false, ct);
-
-        _audit.Log("Period", id, "SyncSelfAttendance", new
-        {
-            SyncedDays = syncedCount,
-            EmployeesWithPunches = empPunchedSet.Count,
-            TotalEmployees = employees.Count
-        }, companyId: period.CompanyId, periodId: id);
-
-        return Ok(new
-        {
-            message = $"Đã đồng bộ {syncedCount} lượt ngày công từ dữ liệu tự chấm công ({empPunchedSet.Count} nhân viên) và hoàn tất tính công.",
-            syncedCount,
-            employeesWithPunches = empPunchedSet.Count,
-            totalEmployees = employees.Count,
-            calculationResult = calcResult
-        });
+        return (syncedCount, empPunchedSet.Count, employees.Count);
     }
 
     // Grid View
@@ -394,21 +455,31 @@ public class PeriodsController : ControllerBase
         _access.EnsureStaffOrAbove();
         var period = await _access.GetPeriodAsync(id, ct: ct);
 
-        var employees = await _db.Employees
+        var days = await _db.DayResults
+            .AsNoTracking()
+            .Where(r => r.PeriodId == id)
+            .OrderBy(r => r.Date)
+            .ToListAsync(ct);
+
+        var empWithData = days.Select(d => d.EmployeeId).ToHashSet();
+        var rawEmpWithData = await _db.RawPunches.AsNoTracking().Where(p => p.PeriodId == id && p.EmployeeId != null).Select(p => p.EmployeeId!.Value).ToListAsync(ct);
+        foreach (var re in rawEmpWithData) empWithData.Add(re);
+
+        var allEmployees = await _db.Employees
             .AsNoTracking()
             .Where(e => e.CompanyId == period.CompanyId)
             .OrderBy(e => e.SortOrder)
             .ThenBy(e => e.EmployeeCode)
             .ToListAsync(ct);
 
+        // Tự động loại bỏ nhân sự đã nghỉ việc trước kỳ công để BCC luôn gọn gàng
+        var employees = allEmployees.Where(e =>
+            (e.EndDate == null || e.EndDate.Value.Date >= period.FromDate.Date || empWithData.Contains(e.Id)) &&
+            (e.StartDate.Date <= period.ToDate.Date || empWithData.Contains(e.Id))
+        ).ToList();
+
         var depts = await _db.Departments.AsNoTracking().Where(d => d.CompanyId == period.CompanyId).ToDictionaryAsync(d => d.Id, d => d.Name, ct);
         var grps = await _db.EmployeeGroups.AsNoTracking().Where(g => g.CompanyId == period.CompanyId).ToDictionaryAsync(g => g.Id, g => g.Name, ct);
-
-        var days = await _db.DayResults
-            .AsNoTracking()
-            .Where(r => r.PeriodId == id)
-            .OrderBy(r => r.Date)
-            .ToListAsync(ct);
 
         var codes = await _db.AttendanceCodes
             .AsNoTracking()
@@ -425,7 +496,9 @@ public class PeriodsController : ControllerBase
 
         var empGrid = employees.Select(emp =>
         {
-            var empDays = days.Where(d => d.EmployeeId == emp.Id).ToDictionary(d => d.Date.Date);
+            var empDays = days.Where(d => d.EmployeeId == emp.Id)
+                .GroupBy(d => d.Date.Date)
+                .ToDictionary(g => g.Key, g => g.First());
 
             var dayCells = periodDates.Select(d =>
             {
@@ -472,7 +545,9 @@ public class PeriodsController : ControllerBase
                     departmentName = emp.DepartmentId.HasValue && depts.TryGetValue(emp.DepartmentId.Value, out var dn) ? dn : "",
                     groupName = grps.TryGetValue(emp.GroupId, out var gn) ? gn : "",
                     emp.ExemptPunch,
-                    defaultNote = emp.DefaultNote
+                    defaultNote = emp.DefaultNote,
+                    startDate = emp.StartDate,
+                    endDate = emp.EndDate
                 },
                 note = notes.TryGetValue(emp.Id, out var nt) ? nt : "",
                 summary,
@@ -583,6 +658,79 @@ public class PeriodsController : ControllerBase
 
         await _db.SaveChangesAsync(ct);
         return Ok(new { message = "Đã lưu ghi chú." });
+    }
+
+    [HttpGet("{id}/manual-backup-status")]
+    public async Task<IActionResult> GetManualBackupStatus(int id, CancellationToken ct)
+    {
+        _access.EnsureOperatorOrAdmin();
+        var backups = await _db.DayResultManualBackups
+            .AsNoTracking()
+            .Where(b => b.PeriodId == id)
+            .ToListAsync(ct);
+
+        return Ok(new
+        {
+            hasBackup = backups.Any(),
+            backupCount = backups.Count,
+            backedUpAt = backups.OrderByDescending(b => b.BackedUpAt).FirstOrDefault()?.BackedUpAt
+        });
+    }
+
+    [HttpPost("{id}/undo-reset-manual")]
+    public async Task<IActionResult> UndoResetManual(int id, CancellationToken ct)
+    {
+        _access.EnsureOperatorOrAdmin();
+        var period = await _access.GetPeriodAsync(id, ct: ct);
+        if (period.Status == PeriodStatus.Closed)
+        {
+            return BadRequest(new { message = "Kỳ công đã chốt, không thể hoàn tác." });
+        }
+
+        var backups = await _db.DayResultManualBackups
+            .Where(b => b.PeriodId == id)
+            .ToListAsync(ct);
+
+        if (!backups.Any())
+        {
+            return BadRequest(new { message = "Không tìm thấy bản sao lưu nào để hoàn tác." });
+        }
+
+        var dayResults = await _db.DayResults
+            .Where(r => r.PeriodId == id)
+            .ToListAsync(ct);
+
+        var resultMap = dayResults
+            .GroupBy(r => (r.EmployeeId, r.Date.Date))
+            .ToDictionary(g => g.Key, g => g.First());
+        int restoredCount = 0;
+
+        foreach (var b in backups)
+        {
+            if (resultMap.TryGetValue((b.EmployeeId, b.Date.Date), out var dr))
+            {
+                dr.Code = b.Code;
+                dr.PaidValue = b.PaidValue;
+                dr.IsManual = true;
+                dr.ManualReason = b.ManualReason;
+                dr.ManualBy = b.ManualBy;
+                dr.ManualAt = b.ManualAt;
+                restoredCount++;
+            }
+        }
+
+        // Xóa backup sau khi đã khôi phục thành công
+        _db.DayResultManualBackups.RemoveRange(backups);
+        await _db.SaveChangesAsync(ct);
+
+        _audit.Log("Period", id, "UndoResetManual", new { RestoredCount = restoredCount },
+            companyId: period.CompanyId, periodId: id);
+
+        return Ok(new
+        {
+            message = $"Đã hoàn tác và khôi phục thành công {restoredCount} ô đã sửa tay trước đó!",
+            restoredCount
+        });
     }
 
     [HttpGet("{id}/warnings")]
@@ -701,6 +849,52 @@ public class PeriodsController : ControllerBase
         return Ok(new { message = "Đã mở chốt kỳ công thành công." });
     }
 
+    // Xóa toàn bộ dữ liệu chấm công của một kỳ
+    [HttpDelete("{id}")]
+    [Authorize(Roles = Roles.Admin)]
+    public async Task<IActionResult> DeletePeriod(int id, CancellationToken ct)
+    {
+        var period = await _access.GetPeriodAsync(id, tracking: true, ct);
+
+        if (period.Status == PeriodStatus.Closed)
+        {
+            return BadRequest(new { message = "Kỳ công đã chốt. Chỉ Admin mới có thể mở chốt và xóa kỳ công. Hãy mở chốt kỳ trước khi xóa." });
+        }
+
+        // Xóa toàn bộ dữ liệu chấm công
+        var dayResults = await _db.DayResults.Where(r => r.PeriodId == id).ToListAsync(ct);
+        if (dayResults.Count > 0) _db.DayResults.RemoveRange(dayResults);
+
+        var manualBackups = await _db.DayResultManualBackups.Where(b => b.PeriodId == id).ToListAsync(ct);
+        if (manualBackups.Count > 0) _db.DayResultManualBackups.RemoveRange(manualBackups);
+
+        var rawPunches = await _db.RawPunches.Where(p => p.PeriodId == id).ToListAsync(ct);
+        if (rawPunches.Count > 0) _db.RawPunches.RemoveRange(rawPunches);
+
+        var importBatches = await _db.ImportBatches.Where(b => b.PeriodId == id).ToListAsync(ct);
+        if (importBatches.Count > 0) _db.ImportBatches.RemoveRange(importBatches);
+
+        var periodNotes = await _db.PeriodNotes.Where(n => n.PeriodId == id).ToListAsync(ct);
+        if (periodNotes.Count > 0) _db.PeriodNotes.RemoveRange(periodNotes);
+
+        var exportHistory = await _db.ExportHistory.Where(e => e.PeriodId == id).ToListAsync(ct);
+        if (exportHistory.Count > 0) _db.ExportHistory.RemoveRange(exportHistory);
+
+        _audit.Log("Period", period.Id, "DeletePeriod",
+            $"Xóa toàn bộ kỳ công tháng {period.Month:00}/{period.Year} ({dayResults.Count} ngày công, {rawPunches.Count} raw punches, {importBatches.Count} batches)",
+            companyId: period.CompanyId, periodId: id);
+
+        _db.Periods.Remove(period);
+        await _db.SaveChangesAsync(ct);
+
+        return Ok(new
+        {
+            message = $"Đã xóa toàn bộ kỳ công tháng {period.Month:00}/{period.Year} và {dayResults.Count} bản ghi chấm công.",
+            deletedDayResults = dayResults.Count,
+            deletedRawPunches = rawPunches.Count
+        });
+    }
+
     // EXPORT EXCEL
     [HttpGet("{id}/export-excel")]
     public async Task<IActionResult> ExportExcel(int id, CancellationToken ct)
@@ -710,15 +904,24 @@ public class PeriodsController : ControllerBase
         var company = await _db.Companies.FindAsync(new object[] { period.CompanyId }, ct);
         if (company == null) return NotFound();
 
-        var employees = await _db.Employees
+        var dayResults = await _db.DayResults.AsNoTracking().Where(r => r.PeriodId == id).ToListAsync(ct);
+        var empWithData = dayResults.Select(d => d.EmployeeId).ToHashSet();
+        var rawEmpWithData = await _db.RawPunches.AsNoTracking().Where(p => p.PeriodId == id && p.EmployeeId != null).Select(p => p.EmployeeId!.Value).ToListAsync(ct);
+        foreach (var re in rawEmpWithData) empWithData.Add(re);
+
+        var allEmployees = await _db.Employees
             .AsNoTracking()
             .Where(e => e.CompanyId == period.CompanyId)
             .OrderBy(e => e.SortOrder)
             .ThenBy(e => e.EmployeeCode)
             .ToListAsync(ct);
 
+        var employees = allEmployees.Where(e =>
+            (e.EndDate == null || e.EndDate.Value.Date >= period.FromDate.Date || empWithData.Contains(e.Id)) &&
+            (e.StartDate.Date <= period.ToDate.Date || empWithData.Contains(e.Id))
+        ).ToList();
+
         var depts = await _db.Departments.AsNoTracking().Where(d => d.CompanyId == period.CompanyId).ToDictionaryAsync(d => d.Id, ct);
-        var dayResults = await _db.DayResults.AsNoTracking().Where(r => r.PeriodId == id).ToListAsync(ct);
         var notes = await _db.PeriodNotes.AsNoTracking().Where(n => n.PeriodId == id).ToDictionaryAsync(n => n.EmployeeId, n => n.Note, ct);
 
         var codes = await _db.AttendanceCodes
@@ -762,8 +965,17 @@ public class PeriodsController : ControllerBase
         var company = await _db.Companies.FindAsync(new object[] { period.CompanyId }, ct);
         if (company == null) return NotFound();
 
-        var employees = await _db.Employees.AsNoTracking().Where(e => e.CompanyId == period.CompanyId).ToListAsync(ct);
         var dayResults = await _db.DayResults.AsNoTracking().Where(r => r.PeriodId == id).ToListAsync(ct);
+        var empWithData = dayResults.Select(d => d.EmployeeId).ToHashSet();
+        var rawEmpWithData = await _db.RawPunches.AsNoTracking().Where(p => p.PeriodId == id && p.EmployeeId != null).Select(p => p.EmployeeId!.Value).ToListAsync(ct);
+        foreach (var re in rawEmpWithData) empWithData.Add(re);
+
+        var allEmployees = await _db.Employees.AsNoTracking().Where(e => e.CompanyId == period.CompanyId).ToListAsync(ct);
+        var employees = allEmployees.Where(e =>
+            (e.EndDate == null || e.EndDate.Value.Date >= period.FromDate.Date || empWithData.Contains(e.Id)) &&
+            (e.StartDate.Date <= period.ToDate.Date || empWithData.Contains(e.Id))
+        ).ToList();
+
         var unmatched = await _db.RawPunches.AsNoTracking().Where(p => p.PeriodId == id && p.EmployeeId == null).ToListAsync(ct);
 
         var bytes = _exportService.ExportWarningsSheet(company, period, employees, dayResults, unmatched);

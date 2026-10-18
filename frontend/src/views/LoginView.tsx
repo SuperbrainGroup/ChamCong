@@ -7,9 +7,9 @@ import { Lock, User, AlertCircle, Clock } from 'lucide-react';
 export const LoginView: React.FC = () => {
   const { login } = useAuth();
   const { settings } = usePlatform();
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('Admin@123');
-  const [rememberMe, setRememberMe] = useState(true);
+  const [username, setUsername] = useState(() => localStorage.getItem('saved_username') || '');
+  const [password, setPassword] = useState('');
+  const [rememberMe, setRememberMe] = useState(() => localStorage.getItem('remember_me') !== 'false');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -52,6 +52,15 @@ export const LoginView: React.FC = () => {
       if (res.data.deviceWarning) {
         sessionStorage.setItem('device_login_warning', res.data.deviceWarning);
       }
+
+      if (rememberMe) {
+        localStorage.setItem('saved_username', username);
+        localStorage.setItem('remember_me', 'true');
+      } else {
+        localStorage.removeItem('saved_username');
+        localStorage.setItem('remember_me', 'false');
+      }
+
       login(token, res.data.user);
     } catch (err: any) {
       setError(err.response?.data?.message || 'Không thể đăng nhập. Vui lòng kiểm tra lại thông tin.');

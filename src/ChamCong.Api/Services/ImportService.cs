@@ -63,7 +63,8 @@ public class ImportService : IImportService
             .ToListAsync(ct);
 
         var empByCode = employees
-            .ToDictionary(e => e.EmployeeCode.Trim(), StringComparer.OrdinalIgnoreCase);
+            .GroupBy(e => e.EmployeeCode.Trim(), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
         // Lưu stream vào MemoryStream để tính hash và đọc
         using var ms = new MemoryStream();
@@ -312,12 +313,9 @@ public class ImportService : IImportService
 
         if (commit)
         {
-            // Xóa dữ liệu quẹt thô cũ của kỳ này (thay thế toàn bộ)
+            // Cập nhật trạng thái các batch cũ
             var oldBatches = await _db.ImportBatches.Where(b => b.PeriodId == period.Id).ToListAsync(ct);
             foreach (var b in oldBatches) b.IsCurrent = false;
-
-            var oldPunches = await _db.RawPunches.Where(p => p.PeriodId == period.Id).ToListAsync(ct);
-            _db.RawPunches.RemoveRange(oldPunches);
 
             var batch = new ImportBatch
             {
@@ -336,11 +334,53 @@ public class ImportService : IImportService
             _db.ImportBatches.Add(batch);
             await _db.SaveChangesAsync(ct);
 
+            // GỘP DỮ LIỆU THÔNG MINH (Không xóa trắng dữ liệu tự chấm công của nhân viên)
+            var existingPunches = await _db.RawPunches.Where(p => p.PeriodId == period.Id).ToListAsync(ct);
+            var punchMap = existingPunches
+                .Where(p => p.EmployeeId.HasValue)
+                .GroupBy(p => (p.EmployeeId!.Value, p.WorkDate.Date))
+                .ToDictionary(g => g.Key, g => g.First());
+
             foreach (var p in punchesToSave)
             {
                 p.BatchId = batch.Id;
+                if (p.EmployeeId.HasValue && punchMap.TryGetValue((p.EmployeeId.Value, p.WorkDate.Date), out var existing))
+                {
+                    // Đã có dữ liệu từ trước (tự chấm công hoặc lần import trước) -> Gộp giờ vào/ra tối ưu
+                    short? mergedInMin = null;
+                    if (existing.InMin.HasValue && p.InMin.HasValue)
+                        mergedInMin = Math.Min(existing.InMin.Value, p.InMin.Value);
+                    else
+                        mergedInMin = p.InMin ?? existing.InMin;
+
+                    short? mergedOutMin = null;
+                    if (existing.OutMin.HasValue && p.OutMin.HasValue)
+                        mergedOutMin = Math.Max(existing.OutMin.Value, p.OutMin.Value);
+                    else
+                        mergedOutMin = p.OutMin ?? existing.OutMin;
+
+                    existing.InMin = mergedInMin;
+                    existing.OutMin = mergedOutMin;
+                    existing.InTime = mergedInMin.HasValue ? $"{(mergedInMin.Value / 60):D2}:{(mergedInMin.Value % 60):D2}:00" : null;
+                    existing.OutTime = mergedOutMin.HasValue ? $"{(mergedOutMin.Value / 60):D2}:{(mergedOutMin.Value % 60):D2}:00" : null;
+                    existing.Source = (existing.Source == "APP" || existing.Source == "MERGED") ? "MERGED" : "EXCEL";
+                    existing.BatchId = batch.Id;
+                    if (!string.IsNullOrEmpty(p.LeaveType)) existing.LeaveType = p.LeaveType;
+                    if (!string.IsNullOrEmpty(p.LeaveStatus)) existing.LeaveStatus = p.LeaveStatus;
+                    if (!string.IsNullOrEmpty(p.LeaveHours)) existing.LeaveHours = p.LeaveHours;
+                    if (!string.IsNullOrEmpty(p.Reason)) existing.Reason = p.Reason;
+                }
+                else
+                {
+                    // Chưa có dữ liệu của ngày này -> Thêm mới bản ghi từ Excel
+                    p.Source = "EXCEL";
+                    _db.RawPunches.Add(p);
+                    if (p.EmployeeId.HasValue)
+                    {
+                        punchMap[(p.EmployeeId.Value, p.WorkDate.Date)] = p;
+                    }
+                }
             }
-            _db.RawPunches.AddRange(punchesToSave);
 
             period.Status = PeriodStatus.Imported;
             _audit.Log("Period", period.Id, "ImportPunches",

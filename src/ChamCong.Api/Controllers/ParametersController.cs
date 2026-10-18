@@ -9,7 +9,7 @@ namespace ChamCong.Api.Controllers;
 
 [ApiController]
 [Route("api")]
-[Authorize]
+[Authorize(Policy = "RequireHR")]
 public class ParametersController : ControllerBase
 {
     private readonly AppDbContext _db;
@@ -156,5 +156,134 @@ public class ParametersController : ControllerBase
         await _db.SaveChangesAsync(ct);
 
         return Ok(new { message = "Lưu tham số thành công." });
+    }
+
+    public record ShiftHoursDto(
+        string ShiftStart,
+        string ShiftEnd,
+        string LunchStart,
+        int LunchMinutes,
+        int CheckoutPrepareMinutes,
+        string CheckoutStartTime,
+        string StandardHoursRange,
+        string CompanyName
+    );
+
+    public record SaveShiftHoursRequestDto(
+        string ShiftStart,
+        string ShiftEnd,
+        string? LunchStart,
+        int? LunchMinutes,
+        int? CheckoutPrepareMinutes
+    );
+
+    [HttpGet("companies/{companyId}/shift-hours")]
+    public async Task<IActionResult> GetShiftHours(int companyId, CancellationToken ct)
+    {
+        var company = await _db.Companies.AsNoTracking().FirstOrDefaultAsync(c => c.Id == companyId, ct);
+        if (company == null) return NotFound(new { message = "Không tìm thấy hội sở." });
+
+        var comParams = await _db.ParameterValues.AsNoTracking()
+            .Where(p => (p.CompanyId == null || p.CompanyId == companyId) && p.GroupId == null)
+            .ToListAsync(ct);
+
+        string GetParam(string code, string fallback)
+        {
+            var comp = comParams.FirstOrDefault(p => p.CompanyId == companyId && p.Code == code);
+            if (comp != null && !string.IsNullOrWhiteSpace(comp.Value)) return comp.Value.Trim();
+            var sys = comParams.FirstOrDefault(p => p.CompanyId == null && p.Code == code);
+            if (sys != null && !string.IsNullOrWhiteSpace(sys.Value)) return sys.Value.Trim();
+            return fallback;
+        }
+
+        var shiftHours = GetParam(ParamCatalog.ShiftStandardHours, "08:00-17:00");
+        var lunchStart = GetParam(ParamCatalog.LunchBreakStart, "12:00");
+        var lunchMinutesStr = GetParam(ParamCatalog.LunchBreakMinutes, "60");
+        int.TryParse(lunchMinutesStr, out var lunchMinutes);
+        if (lunchMinutes <= 0) lunchMinutes = 60;
+
+        TimeUtil.TryParseRange(shiftHours, out var startMin, out var endMin);
+        if (startMin <= 0 && endMin <= 0)
+        {
+            startMin = 480;
+            endMin = 1020;
+        }
+
+        const int prepareMinutes = 30;
+        var checkoutStartMin = Math.Max(startMin, endMin - prepareMinutes);
+
+        return Ok(new ShiftHoursDto(
+            TimeUtil.FormatHm(startMin),
+            TimeUtil.FormatHm(endMin),
+            lunchStart,
+            lunchMinutes,
+            prepareMinutes,
+            TimeUtil.FormatHm(checkoutStartMin),
+            $"{TimeUtil.FormatHm(startMin)}-{TimeUtil.FormatHm(endMin)}",
+            company.Name
+        ));
+    }
+
+    [HttpPost("companies/{companyId}/shift-hours")]
+    public async Task<IActionResult> SaveShiftHours(int companyId, [FromBody] SaveShiftHoursRequestDto dto, CancellationToken ct)
+    {
+        _access.EnsureHR();
+        await _access.EnsureCompanyAsync(companyId, ct);
+
+        if (!TimeUtil.TryParseHm(dto.ShiftStart, out var startMin) || !TimeUtil.TryParseHm(dto.ShiftEnd, out var endMin))
+        {
+            return BadRequest(new { message = "Định dạng giờ vào ca hoặc giờ tan ca không hợp lệ (HH:mm)." });
+        }
+
+        if (startMin >= endMin)
+        {
+            return BadRequest(new { message = "Giờ vào ca phải nhỏ hơn giờ tan ca." });
+        }
+
+        var shiftRange = $"{TimeUtil.FormatHm(startMin)}-{TimeUtil.FormatHm(endMin)}";
+        var lunchStart = string.IsNullOrWhiteSpace(dto.LunchStart) ? "12:00" : dto.LunchStart.Trim();
+        var lunchMinutes = dto.LunchMinutes.GetValueOrDefault(60);
+        if (lunchMinutes < 0 || lunchMinutes > 240) lunchMinutes = 60;
+
+        var flexInWindow = $"{TimeUtil.FormatHm(startMin)}-{TimeUtil.FormatHm(startMin + 10)}";
+        var flexOutWindow = $"{TimeUtil.FormatHm(endMin)}-{TimeUtil.FormatHm(endMin + 10)}";
+
+        var date = DateTime.Today;
+
+        async Task UpsertParamAsync(string code, string val)
+        {
+            var existing = await _db.ParameterValues
+                .FirstOrDefaultAsync(p => p.CompanyId == companyId && p.GroupId == null && p.Code == code && p.EffectiveFrom == date, ct);
+            if (existing != null)
+            {
+                existing.Value = val;
+                existing.UpdatedBy = _access.Username;
+                existing.UpdatedAt = DateTime.Now;
+            }
+            else
+            {
+                _db.ParameterValues.Add(new ParameterValue
+                {
+                    CompanyId = companyId,
+                    GroupId = null,
+                    Code = code,
+                    Value = val,
+                    EffectiveFrom = date,
+                    UpdatedBy = _access.Username,
+                    UpdatedAt = DateTime.Now
+                });
+            }
+        }
+
+        await UpsertParamAsync(ParamCatalog.ShiftStandardHours, shiftRange);
+        await UpsertParamAsync(ParamCatalog.LunchBreakStart, lunchStart);
+        await UpsertParamAsync(ParamCatalog.LunchBreakMinutes, lunchMinutes.ToString());
+        await UpsertParamAsync(ParamCatalog.FlexInWindow, flexInWindow);
+        await UpsertParamAsync(ParamCatalog.FlexOutWindow, flexOutWindow);
+
+        _audit.Log("CompanyShift", companyId.ToString(), "Update", new { companyId, shiftRange, lunchStart, lunchMinutes }, companyId: companyId);
+        await _db.SaveChangesAsync(ct);
+
+        return Ok(new { message = $"Đã cập nhật ca làm việc hội sở thành công: {shiftRange} (nghỉ trưa: {lunchStart}, {lunchMinutes} phút)." });
     }
 }

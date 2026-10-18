@@ -123,6 +123,13 @@ builder.Services.AddAuthentication(options =>
     };
 });
 
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("RequireAdmin", policy => policy.RequireRole(Roles.Admin));
+    options.AddPolicy("RequireHR", policy => policy.RequireRole(Roles.Admin, Roles.HR, "Operator"));
+    options.AddPolicy("RequireEmployee", policy => policy.RequireRole(Roles.Admin, Roles.HR, Roles.Employee));
+});
+
 builder.Services.AddControllers(options =>
 {
     // Global Deny-by-Default Policy (Mọi API mặc định đều yêu cầu xác thực trừ AllowAnonymous)

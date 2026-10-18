@@ -55,8 +55,33 @@ public static class DbSeeder
             if (File.Exists(path))
             {
                 schemaSql = await File.ReadAllTextAsync(path);
-                logger.LogInformation("Tìm thấy schema.sql tại: {Path}", path);
+                logger.LogInformation("Tìm thấy schema.sql tại tập tin: {Path}", path);
                 break;
+            }
+        }
+
+        // Nếu không tìm thấy file ngoài đĩa, nạp trực tiếp từ Embedded Resource được nhúng trong assembly
+        if (string.IsNullOrWhiteSpace(schemaSql))
+        {
+            try
+            {
+                var assembly = typeof(DbSeeder).Assembly;
+                var resName = assembly.GetManifestResourceNames()
+                    .FirstOrDefault(n => n.EndsWith("schema.sql", StringComparison.OrdinalIgnoreCase));
+                if (!string.IsNullOrEmpty(resName))
+                {
+                    using var stream = assembly.GetManifestResourceStream(resName);
+                    if (stream != null)
+                    {
+                        using var reader = new StreamReader(stream);
+                        schemaSql = await reader.ReadToEndAsync();
+                        logger.LogInformation("Đã nạp schema.sql từ Embedded Resource: {ResourceName}", resName);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning("Không thể nạp schema.sql từ Embedded Resource: {Message}", ex.Message);
             }
         }
 
@@ -72,6 +97,7 @@ public static class DbSeeder
 
                 // Tách câu lệnh theo GO
                 var batches = Regex.Split(schemaSql, @"^\s*GO\s*$", RegexOptions.Multiline | RegexOptions.IgnoreCase);
+                int executedBatches = 0;
                 foreach (var b in batches)
                 {
                     var sql = b.Trim();
@@ -82,6 +108,7 @@ public static class DbSeeder
                     try
                     {
                         await cmd.ExecuteNonQueryAsync();
+                        executedBatches++;
                     }
                     catch (Exception ex)
                     {
@@ -89,12 +116,16 @@ public static class DbSeeder
                     }
                 }
 
-                logger.LogInformation("✅ Đã kiểm tra & đồng bộ cấu trúc CSDL thành công từ schema.sql!");
+                logger.LogInformation("✅ [Auto-Migration] Đã tự động kiểm tra & cập nhật cấu trúc CSDL thành công ({Count} batch SQL đã thực thi)!", executedBatches);
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Lỗi khi chạy schema.sql: {Message}", ex.Message);
             }
+        }
+        else
+        {
+            logger.LogWarning("⚠️ Không tìm thấy schema.sql từ đĩa hoặc Embedded Resource để tự động đồng bộ CSDL.");
         }
 
         // 3. Đảm bảo các cột InTime, OutTime, BatchId trong bảng RawPunches luôn tồn tại và phù hợp
@@ -119,6 +150,121 @@ public static class DbSeeder
         catch (Exception ex)
         {
             logger.LogWarning("Kiểm tra cột RawPunches (InTime/OutTime/BatchId): {Message}", ex.Message);
+        }
+
+        // 3b. Đảm bảo các bảng liên quan đến nhân sự có CompanyId để hỗ trợ trùng mã khác hội sở
+        try
+        {
+            var conn = db.Database.GetDbConnection();
+            if (conn.State != ConnectionState.Open) await conn.OpenAsync();
+
+            var multiBranchMigrationSqls = new[]
+            {
+                @"IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_EmployeeRequests' AND COLUMN_NAME = 'CompanyId')
+                  BEGIN
+                      ALTER TABLE dbo.tbl_EmployeeRequests ADD CompanyId INT NULL CONSTRAINT FK_Req_Company REFERENCES dbo.Companies(Id);
+                  END",
+
+                @"UPDATE r SET r.CompanyId = e.CompanyId
+                  FROM dbo.tbl_EmployeeRequests r
+                  JOIN dbo.Employees e ON r.EmployeeCode = e.EmployeeCode
+                  WHERE r.CompanyId IS NULL",
+
+                @"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Req_Comp_Emp')
+                      CREATE NONCLUSTERED INDEX IX_Req_Comp_Emp ON dbo.tbl_EmployeeRequests(CompanyId, EmployeeCode)",
+
+                @"IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_EmployeeDevices' AND COLUMN_NAME = 'CompanyId')
+                  BEGIN
+                      ALTER TABLE dbo.tbl_EmployeeDevices ADD CompanyId INT NULL CONSTRAINT FK_Dev_Company REFERENCES dbo.Companies(Id);
+                  END",
+
+                @"UPDATE d SET d.CompanyId = e.CompanyId
+                  FROM dbo.tbl_EmployeeDevices d
+                  JOIN dbo.Employees e ON d.EmployeeCode = e.EmployeeCode
+                  WHERE d.CompanyId IS NULL",
+
+                @"IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot')
+                      DROP INDEX UX_Dev_ActiveSlot ON dbo.tbl_EmployeeDevices",
+
+                @"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot')
+                      CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_ActiveSlot ON dbo.tbl_EmployeeDevices(CompanyId, EmployeeCode, DeviceType) WHERE IsActiveSlot = 1",
+
+                @"IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_DailyPunchSummary' AND COLUMN_NAME = 'CompanyId')
+                  BEGIN
+                      ALTER TABLE dbo.tbl_DailyPunchSummary ADD CompanyId INT NOT NULL CONSTRAINT DF_DPS_Comp DEFAULT (1);
+                  END",
+
+                @"UPDATE s SET s.CompanyId = ISNULL(e.CompanyId, 1)
+                  FROM dbo.tbl_DailyPunchSummary s
+                  JOIN dbo.Employees e ON s.EmployeeCode = e.EmployeeCode
+                  WHERE s.CompanyId = 1",
+
+                @"IF NOT EXISTS (
+                      SELECT 1 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE 
+                      WHERE TABLE_NAME = 'tbl_DailyPunchSummary' AND CONSTRAINT_NAME = 'PK_DailyPunch' AND COLUMN_NAME = 'CompanyId'
+                  )
+                  BEGIN
+                      ALTER TABLE dbo.tbl_DailyPunchSummary DROP CONSTRAINT PK_DailyPunch;
+                      ALTER TABLE dbo.tbl_DailyPunchSummary ADD CONSTRAINT PK_DailyPunch PRIMARY KEY (CompanyId, EmployeeCode, WorkDate);
+                  END",
+
+                @"IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_TimeAdjustments' AND COLUMN_NAME = 'CompanyId')
+                  BEGIN
+                      ALTER TABLE dbo.tbl_TimeAdjustments ADD CompanyId INT NULL CONSTRAINT FK_Adj_Company REFERENCES dbo.Companies(Id);
+                  END",
+
+                @"UPDATE a SET a.CompanyId = e.CompanyId
+                  FROM dbo.tbl_TimeAdjustments a
+                  JOIN dbo.Employees e ON a.EmployeeCode = e.EmployeeCode
+                  WHERE a.CompanyId IS NULL",
+
+                @"IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Adj_Active')
+                      DROP INDEX UX_Adj_Active ON dbo.tbl_TimeAdjustments",
+
+                @"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Adj_Active')
+                      CREATE UNIQUE NONCLUSTERED INDEX UX_Adj_Active ON dbo.tbl_TimeAdjustments(CompanyId, EmployeeCode, WorkDate) WHERE IsActive = 1",
+
+                @"IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_EmployeeBranchAssignments' AND COLUMN_NAME = 'CompanyId')
+                  BEGIN
+                      ALTER TABLE dbo.tbl_EmployeeBranchAssignments ADD CompanyId INT NULL CONSTRAINT FK_EBA_Company REFERENCES dbo.Companies(Id);
+                  END",
+
+                @"UPDATE a SET a.CompanyId = e.CompanyId
+                  FROM dbo.tbl_EmployeeBranchAssignments a
+                  JOIN dbo.Employees e ON a.EmployeeCode = e.EmployeeCode
+                  WHERE a.CompanyId IS NULL",
+
+                @"IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_EBA_Primary')
+                      DROP INDEX UX_EBA_Primary ON dbo.tbl_EmployeeBranchAssignments",
+
+                @"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_EBA_Primary')
+                      CREATE UNIQUE NONCLUSTERED INDEX UX_EBA_Primary ON dbo.tbl_EmployeeBranchAssignments(CompanyId, EmployeeCode) WHERE IsPrimary = 1 AND ToDate IS NULL",
+
+                @"IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_WebAttendanceLogs' AND COLUMN_NAME = 'CompanyId')
+                  BEGIN
+                      ALTER TABLE dbo.tbl_WebAttendanceLogs ADD CompanyId INT NULL CONSTRAINT FK_Log_Company REFERENCES dbo.Companies(Id);
+                  END",
+
+                @"UPDATE l SET l.CompanyId = e.CompanyId
+                  FROM dbo.tbl_WebAttendanceLogs l
+                  JOIN dbo.Employees e ON l.EmployeeCode = e.EmployeeCode
+                  WHERE l.CompanyId IS NULL",
+
+                @"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Log_Comp_Emp_Date')
+                      CREATE NONCLUSTERED INDEX IX_Log_Comp_Emp_Date ON dbo.tbl_WebAttendanceLogs(CompanyId, EmployeeCode, WorkDate, CheckTimeUtc)"
+            };
+
+            foreach (var sql in multiBranchMigrationSqls)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = sql;
+                await cmd.ExecuteNonQueryAsync();
+            }
+            logger.LogInformation("✅ [Auto-Migration] Đã đồng bộ hỗ trợ trùng mã nhân viên khác hội sở thành công!");
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("Kiểm tra cấu trúc đa hội sở (CompanyId): {Message}", ex.Message);
         }
 
         // 4. Tiến hành nạp dữ liệu mặc định (Admin, Công ty, Mã chấm công, v.v.)

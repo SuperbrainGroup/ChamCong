@@ -223,6 +223,21 @@ public class DayResult
     public bool OutOfEmployment { get; set; }
 }
 
+public class DayResultManualBackup
+{
+    public long Id { get; set; }
+    public int PeriodId { get; set; }
+    public int EmployeeId { get; set; }
+    public DateTime Date { get; set; }
+    public string? Code { get; set; }
+    public decimal PaidValue { get; set; }
+    public string? ManualReason { get; set; }
+    public string? ManualBy { get; set; }
+    public DateTime? ManualAt { get; set; }
+    public DateTime BackedUpAt { get; set; } = DateTime.UtcNow;
+}
+
+
 public class PeriodNote
 {
     public int PeriodId { get; set; }
@@ -299,6 +314,7 @@ public class HrBranchScope
 public class EmployeeDevice
 {
     public int DeviceBindingId { get; set; }
+    public int? CompanyId { get; set; }
     public string EmployeeCode { get; set; } = "";
     public string DeviceType { get; set; } = "MOBILE"; // MOBILE | PC
     public string SecretHash { get; set; } = "";
@@ -332,6 +348,7 @@ public class RefreshToken
 public class EmployeeBranchAssignment
 {
     public int AssignmentId { get; set; }
+    public int? CompanyId { get; set; }
     public string EmployeeCode { get; set; } = "";
     public string BranchCode { get; set; } = "";
     public bool IsPrimary { get; set; }
@@ -366,6 +383,7 @@ public class BranchNetwork
 public class WebAttendanceLog
 {
     public long WebLogId { get; set; }
+    public int? CompanyId { get; set; }
     public Guid ClientRequestId { get; set; }
     public string EmployeeCode { get; set; } = "";
     public int DeviceBindingId { get; set; }
@@ -392,6 +410,7 @@ public class WebAttendanceLog
 
 public class DailyPunchSummary
 {
+    public int CompanyId { get; set; } = 1;
     public string EmployeeCode { get; set; } = "";
     public DateTime WorkDate { get; set; }
     public TimeSpan? InTime { get; set; }
@@ -407,6 +426,7 @@ public class DailyPunchSummary
 public class TimeAdjustment
 {
     public int AdjustmentId { get; set; }
+    public int? CompanyId { get; set; }
     public string EmployeeCode { get; set; } = "";
     public DateTime WorkDate { get; set; }
     public TimeSpan? AdjInTime { get; set; }
@@ -419,6 +439,7 @@ public class TimeAdjustment
 public class EmployeeRequest
 {
     public int RequestId { get; set; }
+    public int? CompanyId { get; set; }
     public string RequestType { get; set; } = "LEAVE"; // LEAVE | REGULARIZATION
     public string EmployeeCode { get; set; } = "";
     public string? LeaveCode { get; set; }

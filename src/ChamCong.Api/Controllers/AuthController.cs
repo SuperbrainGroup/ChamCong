@@ -95,6 +95,7 @@ public class AuthController : ControllerBase
         if (!roles.Any()) roles.Add(user.Role);
 
         var companyIds = user.Companies.Select(c => c.CompanyId).ToList();
+        int? primaryCompanyId = companyIds.Cast<int?>().FirstOrDefault();
 
         var clientIp = _geofenceService.ResolveClientIp(HttpContext);
         var clientMac = !string.IsNullOrWhiteSpace(dto.MacAddress) 
@@ -108,7 +109,7 @@ public class AuthController : ControllerBase
 
         if (!string.IsNullOrEmpty(user.EmployeeCode) && !string.IsNullOrEmpty(rawDeviceSecret))
         {
-            validatedDevice = await _deviceService.ValidateDeviceSecretAsync(user.EmployeeCode, rawDeviceSecret, ct);
+            validatedDevice = await _deviceService.ValidateDeviceSecretAsync(user.EmployeeCode, rawDeviceSecret, primaryCompanyId, ct);
             isDeviceApproved = validatedDevice != null;
         }
 
@@ -116,10 +117,17 @@ public class AuthController : ControllerBase
         EmployeeDevice? myPcDevice = null;
         if (!string.IsNullOrEmpty(user.EmployeeCode))
         {
-            myPcDevice = await _db.EmployeeDevices.AsNoTracking().FirstOrDefaultAsync(d =>
+            var pcQuery = _db.EmployeeDevices.AsNoTracking().Where(d =>
                 d.EmployeeCode == user.EmployeeCode &&
                 d.DeviceType == "PC" &&
-                d.IsActiveSlot, ct);
+                d.IsActiveSlot);
+
+            if (primaryCompanyId.HasValue)
+            {
+                pcQuery = pcQuery.Where(d => d.CompanyId == primaryCompanyId.Value || d.CompanyId == null);
+            }
+
+            myPcDevice = await pcQuery.FirstOrDefaultAsync(ct);
         }
 
         // Sinh Access Token (8 tiếng nếu thường, 7 ngày nếu RememberMe)

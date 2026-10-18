@@ -45,7 +45,7 @@ public class DevicesController : ControllerBase
     public async Task<IActionResult> RegisterDevice([FromBody] RegisterDeviceDto dto, CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null) return Unauthorized();
 
         var empCode = user.EmployeeCode;
@@ -53,6 +53,12 @@ public class DevicesController : ControllerBase
         {
             return BadRequest(new { code = "NO_EMPLOYEE_LINKED", message = "Tài khoản của bạn chưa được liên kết với hồ sơ nhân viên." });
         }
+
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == empCode);
+        if (primaryCompanyId.HasValue) empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
+        int? companyId = emp?.CompanyId ?? primaryCompanyId;
 
         var clientIp = _geofenceService.ResolveClientIp(HttpContext);
         var (device, rawSecret) = await _deviceService.RegisterDeviceAsync(
@@ -63,6 +69,7 @@ public class DevicesController : ControllerBase
             dto.BrowserInfo,
             dto.FingerprintHash,
             clientIp,
+            companyId,
             ct);
 
         _audit.Log("Device", device.DeviceBindingId, "RegisterDevice", $"Đăng ký thiết bị {device.DeviceType} cho {empCode}");
@@ -86,7 +93,7 @@ public class DevicesController : ControllerBase
     public async Task<IActionResult> RegisterMacAddress([FromBody] RegisterMacDto dto, CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode))
         {
             return BadRequest(new { code = "NO_EMPLOYEE_LINKED", message = "Tài khoản của bạn chưa được liên kết với hồ sơ nhân viên." });
@@ -99,11 +106,20 @@ public class DevicesController : ControllerBase
 
         var cleanMac = dto.MacAddress.Trim().ToUpperInvariant();
 
-        // 1. Ràng buộc: Mỗi địa chỉ MAC chỉ được đăng ký cho 1 nhân viên duy nhất (Chống check-in hộ)
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
+        if (primaryCompanyId.HasValue) empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
+        int? companyId = emp?.CompanyId ?? primaryCompanyId;
+
+        // 1. Ràng buộc: Mỗi địa chỉ MAC chỉ được đăng ký cho 1 nhân viên duy nhất trong cùng hội sở (Chống check-in hộ)
+        // Cho phép cùng địa chỉ MAC đăng ký ở các hội sở khác nhau
+        var macCompanyId = companyId;
         var occupiedByOther = await _db.EmployeeDevices.AsNoTracking().FirstOrDefaultAsync(d =>
             d.DeviceType == "PC" &&
             d.FingerprintHash == cleanMac &&
             d.EmployeeCode != user.EmployeeCode &&
+            (macCompanyId == null ? d.CompanyId == null : d.CompanyId == macCompanyId) &&
             d.IsActiveSlot, ct);
 
         if (occupiedByOther != null)
@@ -111,15 +127,22 @@ public class DevicesController : ControllerBase
             return StatusCode(409, new
             {
                 code = "MAC_ALREADY_REGISTERED",
-                message = $"Địa chỉ MAC máy tính này ({cleanMac}) đã được đăng ký cho một nhân viên khác ({occupiedByOther.EmployeeCode}). Mỗi máy tính chỉ được dùng cho 1 nhân viên để chấm công nhằm chống chấm công hộ. Vui lòng liên hệ HCNS để được hỗ trợ!"
+                message = $"Địa chỉ MAC máy tính này ({cleanMac}) đã được đăng ký cho một nhân viên khác ({occupiedByOther.EmployeeCode}) trong cùng hội sở. Mỗi máy tính chỉ được dùng cho 1 nhân viên trong cùng hội sở để chống chấm công hộ. Vui lòng liên hệ HCNS để được hỗ trợ!"
             });
         }
 
         // 2. Kiểm tra khe PC của nhân viên
-        var existingPc = await _db.EmployeeDevices.FirstOrDefaultAsync(d =>
+        var existingPcQuery = _db.EmployeeDevices.Where(d =>
             d.EmployeeCode == user.EmployeeCode &&
             d.DeviceType == "PC" &&
-            d.IsActiveSlot, ct);
+            d.IsActiveSlot);
+
+        if (companyId.HasValue)
+        {
+            existingPcQuery = existingPcQuery.Where(d => d.CompanyId == companyId.Value || d.CompanyId == null);
+        }
+
+        var existingPc = await existingPcQuery.FirstOrDefaultAsync(ct);
 
         if (existingPc != null)
         {
@@ -134,6 +157,7 @@ public class DevicesController : ControllerBase
                 });
             }
 
+            if (companyId.HasValue) existingPc.CompanyId = companyId.Value;
             existingPc.FingerprintHash = cleanMac;
             existingPc.ApprovalStatus = "APPROVED";
             if (!string.IsNullOrWhiteSpace(dto.DeviceName)) existingPc.DeviceName = dto.DeviceName;
@@ -159,6 +183,7 @@ public class DevicesController : ControllerBase
             Request.Headers.UserAgent,
             cleanMac,
             clientIp,
+            companyId,
             ct);
 
         _audit.Log("Device", newDevice.DeviceBindingId, "RegisterMacAddress", $"Đăng ký mới MAC {cleanMac} cho {user.EmployeeCode}");
@@ -176,13 +201,19 @@ public class DevicesController : ControllerBase
     public async Task<IActionResult> GetMyDevices(CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode))
         {
             return Ok(new { mobile = (object?)null, pc = (object?)null });
         }
 
-        var devices = await _deviceService.GetMyDevicesAsync(user.EmployeeCode, ct);
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
+        if (primaryCompanyId.HasValue) empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
+        int? companyId = emp?.CompanyId ?? primaryCompanyId;
+
+        var devices = await _deviceService.GetMyDevicesAsync(user.EmployeeCode, companyId, ct);
         var mobile = devices.FirstOrDefault(d => d.DeviceType == "MOBILE" && d.IsActiveSlot);
         var pc = devices.FirstOrDefault(d => d.DeviceType == "PC" && d.IsActiveSlot);
 
@@ -251,17 +282,22 @@ public class HrDevicesController : ControllerBase
         {
             await _access.EnsureBranchAsync(branch, ct);
             var branchComp = await _db.Companies.AsNoTracking().FirstOrDefaultAsync(c => c.Code == branch, ct);
-            var empInBranch = await _db.Employees.AsNoTracking().Where(e => branchComp != null && e.CompanyId == branchComp.Id).Select(e => e.EmployeeCode).ToListAsync(ct);
-            var assignedInBranch = await _db.EmployeeBranchAssignments.AsNoTracking().Where(a => a.BranchCode == branch && (a.ToDate == null || a.ToDate >= DateTime.Today)).Select(a => a.EmployeeCode).ToListAsync(ct);
-            var targetEmpCodes = empInBranch.Concat(assignedInBranch).Distinct().ToList();
-            q = q.Where(d => targetEmpCodes.Contains(d.EmployeeCode));
+            if (branchComp != null)
+            {
+                var empInBranch = await _db.Employees.AsNoTracking().Where(e => e.CompanyId == branchComp.Id).Select(e => e.EmployeeCode).ToListAsync(ct);
+                var assignedInBranch = await _db.EmployeeBranchAssignments.AsNoTracking().Where(a => a.BranchCode == branch && (a.ToDate == null || a.ToDate >= DateTime.Today)).Select(a => a.EmployeeCode).ToListAsync(ct);
+                var targetEmpCodes = empInBranch.Concat(assignedInBranch).Distinct().ToList();
+                q = q.Where(d => d.CompanyId == branchComp.Id || (d.CompanyId == null && targetEmpCodes.Contains(d.EmployeeCode)));
+            }
         }
         else
         {
-            var allowedEmpCodes = await _access.AllowedEmployeeCodesAsync(ct);
-            if (allowedEmpCodes != null)
+            var allowedCodes = await _access.AllowedBranchCodesAsync(ct);
+            if (allowedCodes != null)
             {
-                q = q.Where(d => allowedEmpCodes.Contains(d.EmployeeCode));
+                var allowedCompIds = await _db.Companies.AsNoTracking().Where(c => allowedCodes.Contains(c.Code)).Select(c => c.Id).ToListAsync(ct);
+                var allowedEmpCodes = await _access.AllowedEmployeeCodesAsync(ct);
+                q = q.Where(d => (d.CompanyId != null && allowedCompIds.Contains(d.CompanyId.Value)) || (allowedEmpCodes != null && allowedEmpCodes.Contains(d.EmployeeCode)));
             }
         }
 
@@ -283,7 +319,7 @@ public class HrDevicesController : ControllerBase
         var devTarget = await _db.EmployeeDevices.FirstOrDefaultAsync(d => d.DeviceBindingId == id, ct);
         if (devTarget == null) return NotFound(new { message = "Không tìm thấy thiết bị." });
 
-        await _access.EnsureEmployeeCodeAsync(devTarget.EmployeeCode, ct);
+        await _access.EnsureEmployeeCodeAsync(devTarget.EmployeeCode, devTarget.CompanyId, ct);
 
         bool approve = dto.Action?.Equals("APPROVE", StringComparison.OrdinalIgnoreCase) == true;
         var dev = await _deviceService.DecideDeviceAsync(id, User.UserId(), approve, dto.Note, ct);
@@ -303,7 +339,7 @@ public class HrDevicesController : ControllerBase
         var devTarget = await _db.EmployeeDevices.FirstOrDefaultAsync(d => d.DeviceBindingId == id, ct);
         if (devTarget == null) return NotFound(new { message = "Không tìm thấy thiết bị." });
 
-        await _access.EnsureEmployeeCodeAsync(devTarget.EmployeeCode, ct);
+        await _access.EnsureEmployeeCodeAsync(devTarget.EmployeeCode, devTarget.CompanyId, ct);
 
         devTarget.FingerprintHash = dto.MacAddress?.Trim().ToUpperInvariant();
         devTarget.ApprovalStatus = "APPROVED";
@@ -322,7 +358,7 @@ public class HrDevicesController : ControllerBase
         var devTarget = await _db.EmployeeDevices.FirstOrDefaultAsync(d => d.DeviceBindingId == id, ct);
         if (devTarget == null) return NotFound(new { message = "Không tìm thấy thiết bị." });
 
-        await _access.EnsureEmployeeCodeAsync(devTarget.EmployeeCode, ct);
+        await _access.EnsureEmployeeCodeAsync(devTarget.EmployeeCode, devTarget.CompanyId, ct);
 
         await _deviceService.RevokeDeviceAsync(id, User.UserId(), dto.Note, ct);
         _audit.Log("Device", id, "RevokeDevice", dto.Note);

@@ -19,6 +19,7 @@ public interface IGeofenceService
         decimal? accuracy,
         string? gpsError,
         string policy,
+        int? companyId = null,
         CancellationToken ct = default);
 }
 
@@ -157,14 +158,22 @@ public class GeofenceService : IGeofenceService
         decimal? accuracy,
         string? gpsError,
         string policy,
+        int? companyId = null,
         CancellationToken ct = default)
     {
         var result = new BranchPresenceResult();
 
         // 1. Tìm các hội sở nhân viên được phân công (hội sở chính trước)
-        var assignments = await _db.EmployeeBranchAssignments
+        var assignmentsQuery = _db.EmployeeBranchAssignments
             .AsNoTracking()
-            .Where(x => x.EmployeeCode == employeeCode && (x.ToDate == null || x.ToDate >= DateTime.Today))
+            .Where(x => x.EmployeeCode == employeeCode && (x.ToDate == null || x.ToDate >= DateTime.Today));
+
+        if (companyId.HasValue)
+        {
+            assignmentsQuery = assignmentsQuery.Where(x => x.CompanyId == companyId.Value || x.CompanyId == null);
+        }
+
+        var assignments = await assignmentsQuery
             .OrderByDescending(x => x.IsPrimary)
             .ToListAsync(ct);
 
@@ -173,7 +182,12 @@ public class GeofenceService : IGeofenceService
         // Nếu chưa có phân công trong bảng, lấy hội sở từ hồ sơ nhân viên Phase 1
         if (!assignedBranchCodes.Any())
         {
-            var emp = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(x => x.EmployeeCode == employeeCode, ct);
+            var empQuery = _db.Employees.AsNoTracking().Where(x => x.EmployeeCode == employeeCode);
+            if (companyId.HasValue)
+            {
+                empQuery = empQuery.Where(x => x.CompanyId == companyId.Value);
+            }
+            var emp = await empQuery.FirstOrDefaultAsync(ct);
             if (emp != null)
             {
                 var comp = await _db.Companies.AsNoTracking().FirstOrDefaultAsync(x => x.Id == emp.CompanyId, ct);

@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Period, PeriodGridData, GridEmployeeRow, GridDayCell } from '../../types';
 import { api } from '../../api/client';
 import { useToast } from '../../context/ToastContext';
-import { Calculator, RefreshCw, ArrowRight, Search, Edit3, MessageSquare, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Calculator, RefreshCw, ArrowRight, Search, Edit3, MessageSquare, AlertCircle, CheckCircle2, RotateCcw, Eye, EyeOff } from 'lucide-react';
 
 interface Step3CalculateGridProps {
   period: Period;
@@ -17,11 +17,16 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
   const [calculating, setCalculating] = useState(false);
   const [search, setSearch] = useState('');
   const [selectedDept, setSelectedDept] = useState('ALL');
+  const [showTerminated, setShowTerminated] = useState(false);
   const [selectedCell, setSelectedCell] = useState<{ emp: GridEmployeeRow['employee']; cell: GridDayCell } | null>(null);
   const [editCode, setEditCode] = useState('');
   const [editReason, setEditReason] = useState('');
   const [savingEdit, setSavingEdit] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
+
+  // Sao lưu và Hoàn tác ô sửa tay
+  const [backupInfo, setBackupInfo] = useState<{ hasBackup: boolean; backupCount: number; backedUpAt?: string } | null>(null);
+  const [undoing, setUndoing] = useState(false);
 
   // Ghi chú nhân viên
   const [editingNoteEmp, setEditingNoteEmp] = useState<number | null>(null);
@@ -39,21 +44,46 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
     }
   };
 
+  const fetchBackupStatus = async () => {
+    try {
+      const res = await api.get<{ hasBackup: boolean; backupCount: number; backedUpAt?: string }>(`/periods/${period.id}/manual-backup-status`);
+      setBackupInfo(res.data);
+    } catch {
+      // ignore
+    }
+  };
+
   useEffect(() => {
     fetchGrid();
+    fetchBackupStatus();
   }, [period.id]);
 
   const handleCalculate = async (resetManual = false) => {
     setCalculating(true);
     try {
       await api.post(`/periods/${period.id}/calculate?resetManual=${resetManual}`);
-      toast.success(resetManual ? 'Đã tính lại công và khôi phục các ô sửa tay thành công!' : 'Đã chạy tính công toàn bộ kỳ công thành công!');
+      toast.success(resetManual ? 'Đã đặt lại về mặc định và tạo bản sao lưu an toàn cho các ô sửa tay!' : 'Đã chạy tính công toàn bộ và bảo lưu các ô sửa tay thành công!');
       onCalculated();
       await fetchGrid();
+      await fetchBackupStatus();
     } catch (err: any) {
       toast.error(err.response?.data?.message || 'Lỗi khi tính công.');
     } finally {
       setCalculating(false);
+    }
+  };
+
+  const handleUndoResetManual = async () => {
+    setUndoing(true);
+    try {
+      const res = await api.post<{ message: string; restoredCount: number }>(`/periods/${period.id}/undo-reset-manual`);
+      toast.success(res.data.message || 'Đã hoàn tác và khôi phục các ô sửa tay thành công!');
+      await fetchGrid();
+      await fetchBackupStatus();
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || 'Lỗi khi hoàn tác.');
+    } finally {
+      setUndoing(false);
     }
   };
 
@@ -114,10 +144,20 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
     return Array.from(set).sort();
   }, [data]);
 
-  // Filtered employees
+  const today = new Date().toISOString().split('T')[0];
+  const terminatedInGridCount = React.useMemo(() => {
+    if (!data) return 0;
+    return data.grid.filter(g => g.employee.endDate && g.employee.endDate.split('T')[0] <= today).length;
+  }, [data, today]);
+
+  // Filtered employees - mặc định ẩn nhân sự đã nghỉ việc để BCC luôn gọn gàng
   const filteredGrid = React.useMemo(() => {
     if (!data) return [];
     return data.grid.filter((g) => {
+      const isTerminated = g.employee.endDate && g.employee.endDate.split('T')[0] <= today;
+      if (!showTerminated && isTerminated && (g.summary.workDays === 0 || (g.employee.endDate && new Date(g.employee.endDate) < new Date(period.fromDate)))) {
+        return false;
+      }
       if (selectedDept !== 'ALL' && g.employee.departmentName !== selectedDept) return false;
       if (search.trim()) {
         const s = search.trim().toLowerCase();
@@ -127,7 +167,7 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
       }
       return true;
     });
-  }, [data, selectedDept, search]);
+  }, [data, selectedDept, search, showTerminated, today, period.fromDate]);
 
   const isClosed = period.status === 'Closed';
 
@@ -141,18 +181,19 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
               className="btn btn-primary"
               onClick={() => handleCalculate(false)}
               disabled={calculating || isClosed}
+              title="Chạy engine tính công, bảo lưu 100% các ô đã chỉnh sửa tay"
             >
               <Calculator size={16} />
-              <span>{calculating ? 'Đang chạy engine tính công...' : 'Tính công toàn bộ'}</span>
+              <span>{calculating ? 'Đang chạy engine tính công...' : '⚡ Tính công & Cập nhật'}</span>
             </button>
 
             <button
               className="btn btn-secondary"
               onClick={async () => {
                 const confirmed = await toast.confirm({
-                  title: 'Xác nhận tính lại công',
-                  message: 'Bạn có chắc muốn tính lại và hủy tất cả các ô đã chỉnh sửa tay không?',
-                  confirmText: 'Tính lại toàn bộ',
+                  title: 'Xác nhận đặt lại về mặc định',
+                  message: 'Thao tác này sẽ đặt lại các ô đã sửa tay về kết quả tính tự động. Hệ thống sẽ tự động tạo bản sao lưu an toàn để bạn có thể bấm "Hoàn tác" bất kỳ lúc nào nếu thao tác nhầm. Bạn có muốn tiếp tục?',
+                  confirmText: 'Đặt lại về mặc định',
                   type: 'danger'
                 });
                 if (confirmed) {
@@ -160,11 +201,34 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
                 }
               }}
               disabled={calculating || isClosed}
-              title="Tính lại từ đầu và xóa toàn bộ các ô đã sửa tay"
+              title="Đặt lại các ô sửa tay về kết quả tính tự động (có thể hoàn tác)"
             >
               <RefreshCw size={16} />
-              <span>Tính lại</span>
+              <span>Đặt lại về mặc định</span>
             </button>
+
+            {backupInfo?.hasBackup && (
+              <button
+                type="button"
+                className="btn btn-warning"
+                onClick={handleUndoResetManual}
+                disabled={undoing || calculating || isClosed}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontWeight: 700,
+                  backgroundColor: '#FEF3C7',
+                  borderColor: '#F59E0B',
+                  color: '#92400E',
+                  boxShadow: '0 1px 3px rgba(245, 158, 11, 0.2)'
+                }}
+                title="Khôi phục lại toàn bộ các ô đã chỉnh sửa tay trước khi tính lại"
+              >
+                <RotateCcw size={15} className={undoing ? 'animate-spin' : ''} />
+                <span>↩️ Hoàn tác {backupInfo.backupCount} ô sửa tay</span>
+              </button>
+            )}
 
             {period.calculatedAt && (
               <span style={{ fontSize: '13px', color: 'var(--neutral-500)', marginLeft: '6px' }}>
@@ -199,6 +263,19 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
+
+            {terminatedInGridCount > 0 && (
+              <button
+                type="button"
+                className={`btn btn-sm ${showTerminated ? 'btn-primary' : 'btn-secondary'}`}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
+                onClick={() => setShowTerminated(!showTerminated)}
+                title={showTerminated ? "Bấm để ẩn nhân sự đã nghỉ việc khỏi bảng tính" : "Bấm để hiện nhân sự đã nghỉ việc"}
+              >
+                {showTerminated ? <EyeOff size={14} /> : <Eye size={14} />}
+                <span>{showTerminated ? 'Ẩn NV đã nghỉ' : `Hiện NV đã nghỉ (${terminatedInGridCount})`}</span>
+              </button>
+            )}
 
             <button className="btn btn-success" onClick={onNextStep}>
               <span>Bước tiếp theo: Xuất file & Chốt kỳ</span>

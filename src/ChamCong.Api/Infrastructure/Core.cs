@@ -108,9 +108,14 @@ public class AccessService
     }
 
     /// <summary>Bảo vệ chống BOLA: Kiểm tra xem nhân viên này có thuộc cơ sở của user không.</summary>
-    public async Task EnsureEmployeeCodeAsync(string employeeCode, CancellationToken ct = default)
+    public async Task EnsureEmployeeCodeAsync(string employeeCode, int? companyId = null, CancellationToken ct = default)
     {
         if (IsAdmin) return;
+        var allowedCompanies = await AllowedCompanyIdsAsync(ct);
+        if (allowedCompanies != null && companyId.HasValue && !allowedCompanies.Contains(companyId.Value))
+        {
+            throw AppException.Forbidden($"Bạn không có quyền quản trị nhân sự '{employeeCode}' thuộc cơ sở khác.");
+        }
         var allowed = await AllowedEmployeeCodesAsync(ct);
         if (allowed != null && !allowed.Contains(employeeCode))
         {

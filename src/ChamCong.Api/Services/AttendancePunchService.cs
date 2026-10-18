@@ -14,6 +14,7 @@ public class PunchRequestDto
     public string Channel { get; set; } = "MOBILE_PWA"; // MOBILE_PWA | PC_WEB
     public string? UserAgent { get; set; }
     public string? MacAddress { get; set; }
+    public string? PunchType { get; set; } // AUTO | CHECK_IN | CHECK_OUT
 }
 
 public class PunchResultDto
@@ -30,6 +31,8 @@ public class PunchResultDto
     public bool? IpOk { get; set; }
     public string GpsState { get; set; } = "NA";
     public double? DistanceMeters { get; set; }
+    public bool NeedsExplanation { get; set; }
+    public string? ShiftStatus { get; set; }
 }
 
 public interface IAttendancePunchService
@@ -39,9 +42,10 @@ public interface IAttendancePunchService
         string? rawDeviceSecret,
         string clientIp,
         PunchRequestDto request,
+        int? companyId = null,
         CancellationToken ct = default);
 
-    Task AggregateDailySummaryAsync(string employeeCode, DateTime workDate, CancellationToken ct = default);
+    Task AggregateDailySummaryAsync(string employeeCode, DateTime workDate, int? companyId = null, CancellationToken ct = default);
 
     Task BatchReviewPunchesAsync(
         List<long> logIds,
@@ -90,6 +94,7 @@ public class AttendancePunchService : IAttendancePunchService
         string? rawDeviceSecret,
         string clientIp,
         PunchRequestDto request,
+        int? companyId = null,
         CancellationToken ct = default)
     {
         // 1. Kiểm tra thiết bị đã duyệt
@@ -104,9 +109,10 @@ public class AttendancePunchService : IAttendancePunchService
                 throw AppException.Bad("Thiếu địa chỉ MAC của thiết bị PC để kiểm tra chấm công.");
             }
 
-            // Tìm thiết bị PC đã đăng ký của nhân viên
+            // Tìm thiết bị PC đã đăng ký của nhân viên (phân giải theo đúng Hội sở)
             var pcDevice = await _db.EmployeeDevices.FirstOrDefaultAsync(d =>
                 d.EmployeeCode == employeeCode &&
+                (companyId == null || d.CompanyId == null || d.CompanyId == companyId) &&
                 d.DeviceType == "PC" &&
                 d.IsActiveSlot, ct);
 
@@ -137,7 +143,7 @@ public class AttendancePunchService : IAttendancePunchService
         else
         {
             // Đối với thiết bị checkin là Mobile: kiểm tra thiết bị đã duyệt qua device secret
-            device = await _deviceService.ValidateDeviceSecretAsync(employeeCode, rawDeviceSecret, ct);
+            device = await _deviceService.ValidateDeviceSecretAsync(employeeCode, rawDeviceSecret, companyId, ct);
             if (device == null)
             {
                 // Ghi nhật ký an ninh
@@ -181,7 +187,7 @@ public class AttendancePunchService : IAttendancePunchService
 
         // 3. Giới hạn tần suất và số lượt: Mỗi ngày chỉ check-in 1 lần và check-out 1 lần (tối đa 2 lượt hợp lệ)
         var recentLogs = await _db.WebAttendanceLogs
-            .Where(l => l.EmployeeCode == employeeCode && l.WorkDate == workDate)
+            .Where(l => l.EmployeeCode == employeeCode && (companyId == null || l.CompanyId == null || l.CompanyId == companyId) && l.WorkDate == workDate)
             .OrderBy(l => l.CheckTimeUtc)
             .ToListAsync(ct);
 
@@ -189,6 +195,20 @@ public class AttendancePunchService : IAttendancePunchService
         if (usableLogs.Count >= 2)
         {
             throw AppException.Bad("Hôm nay bạn đã thực hiện đủ 1 lượt Check-in và 1 lượt Check-out. Hệ thống không cho phép chấm công thêm để tránh dữ liệu trùng lặp.");
+        }
+
+        // Nếu đã có 1 lượt Check-in hợp lệ, lượt bấm tiếp theo là Check-out -> Cần giới hạn thời gian làm việc tối thiểu 30 phút để chống quẹt nhầm Check-out khi vừa vào làm
+        if (usableLogs.Count == 1)
+        {
+            var firstPunch = usableLogs[0];
+            var elapsedMinutes = (nowUtc - firstPunch.CheckTimeUtc).TotalMinutes;
+            const double minWorkSpanMinutes = 30.0;
+            if (elapsedMinutes < minWorkSpanMinutes)
+            {
+                var remainingMinutes = (int)Math.Max(1, Math.Ceiling(minWorkSpanMinutes - elapsedMinutes));
+                var checkinTimeStr = ToVietnamTime(firstPunch.CheckTimeUtc).ToString("HH:mm:ss");
+                throw AppException.Bad($"Bạn vừa Check-in lúc {checkinTimeStr}. Để tránh quẹt nhầm Check-out khi vừa vào làm, ca làm việc cần tối thiểu {minWorkSpanMinutes} phút trước khi bấm Check-out (vui lòng đợi thêm {remainingMinutes} phút).");
+            }
         }
 
         const int minIntervalSeconds = 60;
@@ -200,7 +220,9 @@ public class AttendancePunchService : IAttendancePunchService
 
         // 4. Lấy chính sách chấm công áp dụng (CHECKIN_POLICY)
         string policy = "OFFICE_STRICT";
-        var emp = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.EmployeeCode == employeeCode, ct);
+        var emp = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.EmployeeCode == employeeCode && (companyId == null || e.CompanyId == companyId), ct);
+        var effectiveCompanyId = companyId ?? emp?.CompanyId;
+
         if (emp != null)
         {
             var groupParam = await _db.ParameterValues
@@ -215,39 +237,78 @@ public class AttendancePunchService : IAttendancePunchService
             }
         }
 
-        // 5. Đánh giá hiện diện (Geofence + CIDR IP)
-        var eval = await _geofenceService.EvaluatePresenceAsync(
-            employeeCode,
-            clientIp,
-            request.Channel,
-            request.Latitude,
-            request.Longitude,
-            request.Accuracy,
-            request.GpsError,
-            policy,
-            ct);
+        // 5. Đánh giá hiện diện:
+        // PC: Chỉ kiểm tra MAC Address (đã xác thực ở Bước 1), KHÔNG kiểm tra Wifi và Location.
+        // Mobile: Không kiểm tra MAC, CHỈ kiểm tra Wifi và Location (GPS).
+        var isPc = request.Channel == "PC_WEB";
+        BranchPresenceResult eval;
 
-        // Đối với Mobile: kiểm tra nếu bị từ chối do không ở mạng văn phòng
-        if (request.Channel != "PC_WEB")
+        if (isPc)
         {
+            string? branchCode = null;
+            var branchAssign = await _db.EmployeeBranchAssignments
+                .AsNoTracking()
+                .Where(a => a.EmployeeCode == employeeCode && (effectiveCompanyId == null || a.CompanyId == null || a.CompanyId == effectiveCompanyId) && (a.ToDate == null || a.ToDate >= DateTime.Today))
+                .FirstOrDefaultAsync(ct);
+            if (branchAssign != null)
+            {
+                branchCode = branchAssign.BranchCode;
+            }
+            else if (emp?.CompanyId != null)
+            {
+                var comp = await _db.Companies.AsNoTracking().FirstOrDefaultAsync(c => c.Id == emp.CompanyId, ct);
+                branchCode = comp?.Code;
+            }
+
+            eval = new BranchPresenceResult
+            {
+                DetectedBranchCode = branchCode,
+                IpOk = true,
+                GpsState = "NA",
+                DistanceMeters = null,
+                VerificationStatus = "VALID",
+                ReasonCode = "PC_MAC_VERIFIED",
+                ReviewState = "NONE",
+                Message = "Chấm công PC xác thực địa chỉ MAC thành công."
+            };
+        }
+        else
+        {
+            eval = await _geofenceService.EvaluatePresenceAsync(
+                employeeCode,
+                clientIp,
+                request.Channel,
+                request.Latitude,
+                request.Longitude,
+                request.Accuracy,
+                request.GpsError,
+                policy,
+                companyId,
+                ct);
+
             if (eval.ReasonCode == "BRANCH_NO_PUBLIC_IP")
             {
                 throw AppException.Bad(eval.Message ?? "Hội sở chưa được thiết lập Mạng Public IP văn phòng. Vui lòng liên hệ Admin/HCNS để cài đặt IP văn phòng.");
             }
-            if (eval.ReasonCode == "PC_NOT_IN_OFFICE")
-            {
-                throw AppException.Bad(eval.Message ?? "Thiết bị hiện tại không kết nối mạng văn phòng hội sở.");
-            }
         }
 
         // 6. Ghi nhật ký lượt bấm bất biến
-        var isPc = request.Channel == "PC_WEB";
+        bool isUncheckedInCheckout = (request.PunchType == "CHECK_OUT" && usableLogs.Count == 0);
+        if (isUncheckedInCheckout)
+        {
+            eval.ReasonCode = "MISSING_IN";
+            eval.VerificationStatus = "REVIEW";
+            eval.ReviewState = "PENDING";
+            eval.Message = "Đã ghi nhận điểm danh ra về. Do chưa có điểm danh vào ca sáng, bạn cần nộp đơn giải trình để được duyệt đủ công.";
+        }
+
         var userAgentInfo = isPc && !string.IsNullOrWhiteSpace(request.MacAddress)
             ? $"{request.UserAgent} [MAC: {request.MacAddress}]"
             : request.UserAgent;
 
         var log = new WebAttendanceLog
         {
+            CompanyId = effectiveCompanyId,
             ClientRequestId = request.ClientRequestId == Guid.Empty ? Guid.NewGuid() : request.ClientRequestId,
             EmployeeCode = employeeCode,
             DeviceBindingId = device.DeviceBindingId,
@@ -277,10 +338,29 @@ public class AttendancePunchService : IAttendancePunchService
 
         await _db.SaveChangesAsync(ct);
 
+        // Tự động gửi thông báo nhắc nhở giải trình cho nhân viên nếu quẹt ra về khi chưa check-in vào ca
+        if (isUncheckedInCheckout)
+        {
+            var userObj = await _db.Users.FirstOrDefaultAsync(u => u.EmployeeCode == employeeCode && (effectiveCompanyId == null || u.Companies.Any(c => c.CompanyId == effectiveCompanyId)), ct);
+            if (userObj != null)
+            {
+                _db.Notifications.Add(new Notification
+                {
+                    UserId = userObj.Id,
+                    Title = "⚠️ Nhắc nhở nộp đơn giải trình bổ sung giờ vào",
+                    Body = $"Bạn vừa điểm danh ra về lúc {nowLocal:HH:mm}. Ca làm việc hôm nay chưa có lượt vào làm, vui lòng tạo đơn giải trình để được ghi nhận công.",
+                    LinkType = "REGULARIZATION",
+                    CreatedAtUtc = DateTime.UtcNow,
+                    IsRead = false
+                });
+                await _db.SaveChangesAsync(ct);
+            }
+        }
+
         // 7. Tự động gộp dữ liệu ngày vào tbl_DailyPunchSummary & RawPunches
         try
         {
-            await AggregateDailySummaryAsync(employeeCode, workDate, ct);
+            await AggregateDailySummaryAsync(employeeCode, workDate, effectiveCompanyId, ct);
         }
         catch (Exception ex)
         {
@@ -306,31 +386,41 @@ public class AttendancePunchService : IAttendancePunchService
             DetectedBranchCode = log.DetectedBranchCode,
             IpOk = log.IpOk,
             GpsState = log.GpsState,
-            DistanceMeters = eval.DistanceMeters
+            DistanceMeters = eval.DistanceMeters,
+            NeedsExplanation = isUncheckedInCheckout,
+            ShiftStatus = isUncheckedInCheckout ? "NEED_EXPLANATION" : null
         };
     }
 
-    public async Task AggregateDailySummaryAsync(string employeeCode, DateTime workDate, CancellationToken ct = default)
+    public async Task AggregateDailySummaryAsync(string employeeCode, DateTime workDate, int? companyId = null, CancellationToken ct = default)
     {
-        // 1. Lấy tất cả lượt bấm của ngày
+        // 1. Kiểm tra điều chỉnh giờ đã duyệt (TimeAdjustment / Giải trình)
+        var adj = await _db.TimeAdjustments
+            .AsNoTracking()
+            .FirstOrDefaultAsync(a => a.EmployeeCode == employeeCode && (companyId == null || a.CompanyId == null || a.CompanyId == companyId) && a.WorkDate == workDate && a.IsActive, ct);
+
+        // 2. Lấy tất cả lượt bấm của ngày
         var logs = await _db.WebAttendanceLogs
-            .Where(l => l.EmployeeCode == employeeCode && l.WorkDate == workDate)
+            .Where(l => l.EmployeeCode == employeeCode && (companyId == null || l.CompanyId == null || l.CompanyId == companyId) && l.WorkDate == workDate)
             .OrderBy(l => l.CheckTimeUtc)
             .ToListAsync(ct);
 
-        if (!logs.Any())
+        var effectiveCompanyId = companyId ?? logs.FirstOrDefault(l => l.CompanyId.HasValue)?.CompanyId ?? adj?.CompanyId;
+
+        // Nếu không có cả logs và không có cả giải trình đã duyệt
+        if (!logs.Any() && adj == null)
         {
             var existingSummary = await _db.DailyPunchSummaries
-                .FirstOrDefaultAsync(s => s.EmployeeCode == employeeCode && s.WorkDate == workDate, ct);
+                .FirstOrDefaultAsync(s => s.EmployeeCode == employeeCode && (effectiveCompanyId == null || s.CompanyId == effectiveCompanyId) && s.WorkDate == workDate, ct);
             if (existingSummary != null)
             {
                 _db.DailyPunchSummaries.Remove(existingSummary);
             }
-            var empDel = await _db.Employees.FirstOrDefaultAsync(e => e.EmployeeCode == employeeCode, ct);
+            var empDel = await _db.Employees.FirstOrDefaultAsync(e => e.EmployeeCode == employeeCode && (effectiveCompanyId == null || e.CompanyId == effectiveCompanyId), ct);
             if (empDel != null)
             {
                 var existingRaw = await _db.RawPunches
-                    .FirstOrDefaultAsync(r => r.EmployeeId == empDel.Id && r.WorkDate == workDate && r.Source == "APP", ct);
+                    .FirstOrDefaultAsync(r => r.EmployeeId == empDel.Id && r.WorkDate == workDate && (r.Source == "APP" || r.Source == "REGULARIZED"), ct);
                 if (existingRaw != null)
                 {
                     _db.RawPunches.Remove(existingRaw);
@@ -343,11 +433,6 @@ public class AttendancePunchService : IAttendancePunchService
         // Lượt bấm được dùng: VerificationStatus == 'VALID' hoặc ReviewState == 'ACCEPTED'
         var usableLogs = logs.Where(l => l.VerificationStatus == "VALID" || l.ReviewState == "ACCEPTED").ToList();
         bool hasPendingReview = logs.Any(l => l.ReviewState == "PENDING");
-
-        // 2. Kiểm tra điều chỉnh giờ đã duyệt (TimeAdjustment)
-        var adj = await _db.TimeAdjustments
-            .AsNoTracking()
-            .FirstOrDefaultAsync(a => a.EmployeeCode == employeeCode && a.WorkDate == workDate && a.IsActive, ct);
 
         TimeSpan? inTime = null;
         TimeSpan? outTime = null;
@@ -363,30 +448,47 @@ public class AttendancePunchService : IAttendancePunchService
         }
         else if (usableLogs.Any())
         {
-            // Lượt vào: lượt hợp lệ sớm nhất
-            var firstLog = usableLogs.First();
-            var firstLocal = ToVietnamTime(firstLog.CheckTimeUtc);
-            inTime = firstLocal.TimeOfDay;
-            inLogId = firstLog.WebLogId;
-
-            // Lượt ra: lượt hợp lệ thứ 2 (Lần 2: Check-out)
-            if (usableLogs.Count > 1)
+            if (usableLogs.Count == 1 && usableLogs[0].ReasonCode == "MISSING_IN")
             {
-                var lastLog = usableLogs.Last();
-                var lastLocal = ToVietnamTime(lastLog.CheckTimeUtc);
-                outTime = lastLocal.TimeOfDay;
-                outLogId = lastLog.WebLogId;
+                // Chỉ có 1 lượt quẹt khi ra về (quên check-in lúc sáng)
+                var onlyLog = usableLogs[0];
+                var onlyLocal = ToVietnamTime(onlyLog.CheckTimeUtc);
+                outTime = onlyLocal.TimeOfDay;
+                outLogId = onlyLog.WebLogId;
+                inTime = null;
+                inLogId = null;
+            }
+            else
+            {
+                // Lượt vào: lượt hợp lệ sớm nhất
+                var firstLog = usableLogs.First();
+                var firstLocal = ToVietnamTime(firstLog.CheckTimeUtc);
+                inTime = firstLocal.TimeOfDay;
+                inLogId = firstLog.WebLogId;
+
+                // Lượt ra: lượt hợp lệ thứ 2 (Lần 2: Check-out)
+                if (usableLogs.Count > 1)
+                {
+                    var lastLog = usableLogs.Last();
+                    var lastLocal = ToVietnamTime(lastLog.CheckTimeUtc);
+                    outTime = lastLocal.TimeOfDay;
+                    outLogId = lastLog.WebLogId;
+                }
             }
         }
 
         // 3. Cập nhật hoặc thêm mới tbl_DailyPunchSummary
         var summary = await _db.DailyPunchSummaries
-            .FirstOrDefaultAsync(s => s.EmployeeCode == employeeCode && s.WorkDate == workDate, ct);
+            .FirstOrDefaultAsync(s => s.EmployeeCode == employeeCode && (effectiveCompanyId == null || s.CompanyId == effectiveCompanyId) && s.WorkDate == workDate, ct);
 
         if (summary == null)
         {
+            var empForComp = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.EmployeeCode == employeeCode && (effectiveCompanyId == null || e.CompanyId == effectiveCompanyId), ct);
+            int compId = effectiveCompanyId ?? empForComp?.CompanyId ?? 1;
+
             summary = new DailyPunchSummary
             {
+                CompanyId = compId,
                 EmployeeCode = employeeCode,
                 WorkDate = workDate,
                 InTime = inTime,
@@ -413,8 +515,8 @@ public class AttendancePunchService : IAttendancePunchService
         }
 
         // 4. Đồng bộ vào bảng RawPunches (dành cho Engine Phase 1)
-        var emp = await _db.Employees.FirstOrDefaultAsync(e => e.EmployeeCode == employeeCode, ct);
-        if (emp != null && emp.AttendanceSource == "APP")
+        var emp = await _db.Employees.FirstOrDefaultAsync(e => e.EmployeeCode == employeeCode && (effectiveCompanyId == null || e.CompanyId == effectiveCompanyId), ct);
+        if (emp != null)
         {
             var openPeriod = await _db.Periods
                 .FirstOrDefaultAsync(p => p.CompanyId == emp.CompanyId && p.FromDate <= workDate && p.ToDate >= workDate, ct);
@@ -447,13 +549,35 @@ public class AttendancePunchService : IAttendancePunchService
                         SourceRow = 0
                     });
                 }
-                else if (existingRaw.Source == "APP" || existingRaw.Source == "REGULARIZED")
+                else
                 {
-                    existingRaw.InMin = inMin;
-                    existingRaw.OutMin = outMin;
-                    existingRaw.InTime = inStr;
-                    existingRaw.OutTime = outStr;
-                    existingRaw.Source = source;
+                    // Nếu là đơn giải trình đã duyệt (REGULARIZED), ưu tiên tuyệt đối
+                    if (source == "REGULARIZED")
+                    {
+                        existingRaw.InMin = inMin;
+                        existingRaw.OutMin = outMin;
+                        existingRaw.InTime = inStr;
+                        existingRaw.OutTime = outStr;
+                        existingRaw.Source = "REGULARIZED";
+                    }
+                    else if (existingRaw.Source == "APP")
+                    {
+                        existingRaw.InMin = inMin;
+                        existingRaw.OutMin = outMin;
+                        existingRaw.InTime = inStr;
+                        existingRaw.OutTime = outStr;
+                        existingRaw.Source = source;
+                    }
+                    else if (existingRaw.Source == "EXCEL" || existingRaw.Source == "MERGED")
+                    {
+                        short? finalInMin = inMin.HasValue && existingRaw.InMin.HasValue ? Math.Min(existingRaw.InMin.Value, inMin.Value) : (inMin ?? existingRaw.InMin);
+                        short? finalOutMin = outMin.HasValue && existingRaw.OutMin.HasValue ? Math.Max(existingRaw.OutMin.Value, outMin.Value) : (outMin ?? existingRaw.OutMin);
+                        existingRaw.InMin = finalInMin;
+                        existingRaw.OutMin = finalOutMin;
+                        existingRaw.InTime = finalInMin.HasValue ? $"{(finalInMin.Value / 60):D2}:{(finalInMin.Value % 60):D2}:00" : null;
+                        existingRaw.OutTime = finalOutMin.HasValue ? $"{(finalOutMin.Value / 60):D2}:{(finalOutMin.Value % 60):D2}:00" : null;
+                        existingRaw.Source = "MERGED";
+                    }
                 }
             }
         }
@@ -471,7 +595,7 @@ public class AttendancePunchService : IAttendancePunchService
         if (!logIds.Any()) return;
 
         var logs = await _db.WebAttendanceLogs.Where(l => logIds.Contains(l.WebLogId)).ToListAsync(ct);
-        var affectedDays = new HashSet<(string EmployeeCode, DateTime WorkDate)>();
+        var affectedDays = new HashSet<(string EmployeeCode, DateTime WorkDate, int? CompanyId)>();
 
         foreach (var l in logs)
         {
@@ -480,7 +604,7 @@ public class AttendancePunchService : IAttendancePunchService
             l.ReviewedAtUtc = DateTime.UtcNow;
             l.ReviewNote = note;
 
-            affectedDays.Add((l.EmployeeCode, l.WorkDate));
+            affectedDays.Add((l.EmployeeCode, l.WorkDate, l.CompanyId));
         }
 
         await _db.SaveChangesAsync(ct);
@@ -488,7 +612,7 @@ public class AttendancePunchService : IAttendancePunchService
         // Tự động gộp lại ngày công cho tất cả các ngày bị ảnh hưởng
         foreach (var item in affectedDays)
         {
-            await AggregateDailySummaryAsync(item.EmployeeCode, item.WorkDate, ct);
+            await AggregateDailySummaryAsync(item.EmployeeCode, item.WorkDate, item.CompanyId, ct);
         }
     }
 
@@ -502,15 +626,15 @@ public class AttendancePunchService : IAttendancePunchService
         var logs = await _db.WebAttendanceLogs.Where(l => logIds.Contains(l.WebLogId)).ToListAsync(ct);
         if (!logs.Any()) return 0;
 
-        var affectedDays = logs.Select(l => (l.EmployeeCode, l.WorkDate)).Distinct().ToList();
+        var affectedDays = logs.Select(l => (l.EmployeeCode, l.WorkDate, l.CompanyId)).Distinct().ToList();
 
         _db.WebAttendanceLogs.RemoveRange(logs);
         await _db.SaveChangesAsync(ct);
 
         // Tự động tính toán lại hoặc dọn dẹp ngày công cho tất cả các ngày bị ảnh hưởng
-        foreach (var (empCode, workDate) in affectedDays)
+        foreach (var (empCode, workDate, compId) in affectedDays)
         {
-            await AggregateDailySummaryAsync(empCode, workDate, ct);
+            await AggregateDailySummaryAsync(empCode, workDate, compId, ct);
         }
 
         return logs.Count;

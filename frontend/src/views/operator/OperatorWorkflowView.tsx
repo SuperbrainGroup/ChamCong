@@ -2,14 +2,16 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { Period } from '../../types';
 import { api } from '../../api/client';
+import { useToast } from '../../context/ToastContext';
 import { Step1Import } from './Step1Import';
 import { Step2Warnings } from './Step2Warnings';
 import { Step3CalculateGrid } from './Step3CalculateGrid';
 import { Step4ExportClose } from './Step4ExportClose';
-import { Plus, Calendar, FileText, AlertTriangle, Table, Download, Lock, Check } from 'lucide-react';
+import { Plus, Calendar, FileText, AlertTriangle, Table, Download, Lock, Check, Trash2 } from 'lucide-react';
 
 export const OperatorWorkflowView: React.FC = () => {
-  const { selectedCompany } = useAuth();
+  const { selectedCompany, user } = useAuth();
+  const toast = useToast();
   const [periods, setPeriods] = useState<Period[]>([]);
   const [selectedPeriod, setSelectedPeriod] = useState<Period | null>(null);
   const [currentStep, setCurrentStep] = useState<number>(1);
@@ -73,6 +75,26 @@ export const OperatorWorkflowView: React.FC = () => {
     }
   };
 
+  const handleDeletePeriod = async () => {
+    if (!selectedPeriod) return;
+    const confirmed = await toast.confirm({
+      title: `Xóa toàn bộ kỳ chấm công Tháng ${String(selectedPeriod.month).padStart(2, '0')}/${selectedPeriod.year}`,
+      message: `CẢNH BÁO NGUY HIỂM: Hành động này sẽ xóa vĩnh viễn toàn bộ kỳ công này bao gồm: bảng tính công (DayResults), dữ liệu quẹt thô (RawPunches), các đợt nạp file (ImportBatches) và mọi ghi chú. Bạn có chắc chắn muốn xóa không?`,
+      confirmText: 'Xóa vĩnh viễn kỳ công',
+      type: 'danger'
+    });
+    if (!confirmed) return;
+
+    try {
+      const res = await api.delete(`/periods/${selectedPeriod.id}`);
+      toast.success(res.data?.message || 'Đã xóa toàn bộ dữ liệu kỳ công thành công.');
+      setSelectedPeriod(null);
+      await fetchPeriods();
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || 'Lỗi khi xóa kỳ chấm công.');
+    }
+  };
+
   if (!selectedCompany) {
     return (
       <div style={{ padding: '40px', textAlign: 'center', color: 'var(--neutral-500)' }}>
@@ -82,7 +104,7 @@ export const OperatorWorkflowView: React.FC = () => {
   }
 
   const steps = [
-    { num: 1, title: '1. Nạp file máy', icon: FileText },
+    { num: 1, title: '1. Dữ liệu chấm công', icon: FileText },
     { num: 2, title: '2. Kiểm tra & Giải trình', icon: AlertTriangle, badge: selectedPeriod?.unresolvedCount },
     { num: 3, title: '3. Bảng tính công', icon: Table },
     { num: 4, title: '4. Xuất file & Chốt kỳ', icon: Download },
@@ -97,7 +119,7 @@ export const OperatorWorkflowView: React.FC = () => {
             Quy Trình Chấm Công & Tính Lương — {selectedCompany ? selectedCompany.name : 'Tất cả hội sở'}
           </h1>
           <p style={{ margin: '4px 0 0 0', fontSize: '13px', color: 'var(--neutral-500)' }}>
-            Quy trình 4 bước: Nạp file máy chấm công, kiểm tra giải trình, tính công và chốt kỳ công
+            Quy trình 4 bước: Tổng hợp dữ liệu chấm công, kiểm tra giải trình, tính công và chốt kỳ công
           </p>
         </div>
       </div>
@@ -149,17 +171,31 @@ export const OperatorWorkflowView: React.FC = () => {
             )}
           </div>
 
-          <button
-            className="btn btn-secondary"
-            onClick={() => {
-              setNewMonth(new Date().getMonth() + 1);
-              setNewYear(new Date().getFullYear());
-              setShowCreateModal(true);
-            }}
-          >
-            <Plus size={16} />
-            <span>Tạo kỳ chấm công mới</span>
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {selectedPeriod && (user?.role === 'Admin' || user?.role === 'HR') && (
+              <button
+                className="btn btn-secondary"
+                style={{ color: '#dc2626', borderColor: '#fecaca', backgroundColor: '#fef2f2' }}
+                onClick={handleDeletePeriod}
+                title={`Xóa toàn bộ dữ liệu kỳ công Tháng ${String(selectedPeriod.month).padStart(2, '0')}/${selectedPeriod.year}`}
+              >
+                <Trash2 size={16} />
+                <span>Xóa kỳ này</span>
+              </button>
+            )}
+
+            <button
+              className="btn btn-secondary"
+              onClick={() => {
+                setNewMonth(new Date().getMonth() + 1);
+                setNewYear(new Date().getFullYear());
+                setShowCreateModal(true);
+              }}
+            >
+              <Plus size={16} />
+              <span>Tạo kỳ chấm công mới</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -226,6 +262,7 @@ export const OperatorWorkflowView: React.FC = () => {
               period={selectedPeriod}
               onImportSuccess={fetchPeriods}
               onNextStep={() => setCurrentStep(2)}
+              onGoToStep={(s) => setCurrentStep(s)}
             />
           )}
 

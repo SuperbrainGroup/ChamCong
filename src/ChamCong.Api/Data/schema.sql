@@ -265,6 +265,26 @@ IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'Day
     ALTER TABLE dbo.DayResults ADD InTime NVARCHAR(20) NULL, OutTime NVARCHAR(20) NULL;
 GO
 
+IF OBJECT_ID(N'dbo.DayResultManualBackups', N'U') IS NULL
+CREATE TABLE dbo.DayResultManualBackups (
+    Id BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT PK_DayResultManualBackups PRIMARY KEY,
+    PeriodId INT NOT NULL CONSTRAINT FK_DayResultManualBackups_Periods REFERENCES dbo.Periods (Id),
+    EmployeeId INT NOT NULL CONSTRAINT FK_DayResultManualBackups_Employees REFERENCES dbo.Employees (Id),
+    [Date] DATE NOT NULL,
+    Code NVARCHAR(10) NULL,
+    PaidValue DECIMAL(4,2) NOT NULL,
+    ManualReason NVARCHAR(500) NULL,
+    ManualBy NVARCHAR(50) NULL,
+    ManualAt DATETIME NULL,
+    BackedUpAt DATETIME NOT NULL CONSTRAINT DF_DayResultManualBackups_At DEFAULT (GETDATE())
+);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_DayResultManualBackups_Period')
+CREATE NONCLUSTERED INDEX IX_DayResultManualBackups_Period ON dbo.DayResultManualBackups (PeriodId, [Date]);
+GO
+
+
 IF OBJECT_ID(N'dbo.PeriodNotes', N'U') IS NULL
 CREATE TABLE dbo.PeriodNotes (
     PeriodId INT NOT NULL CONSTRAINT FK_PeriodNotes_Periods REFERENCES dbo.Periods (Id),
@@ -859,6 +879,145 @@ BEGIN
     ('FAVICON_URL', N'', N'Đường dẫn biểu tượng website'),
     ('COPYRIGHT_TEXT', N'© 2026 Bản quyền thuộc về Nền tảng Chấm công Doanh nghiệp.', N'Thông tin bản quyền chân trang');
 END
+GO
+
+-- 10. ĐỒNG BỘ NÂNG CẤP: HỖ TRỢ TRÙNG MÃ NHÂN VIÊN GIỮA CÁC HỘI SỞ KHÁC NHAU (Idempotent)
+-- Bổ sung CompanyId vào tbl_EmployeeRequests
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_EmployeeRequests' AND COLUMN_NAME = 'CompanyId')
+BEGIN
+    ALTER TABLE dbo.tbl_EmployeeRequests ADD CompanyId INT NULL CONSTRAINT FK_Req_Company REFERENCES dbo.Companies(Id);
+END
+GO
+
+IF EXISTS (SELECT 1 FROM dbo.tbl_EmployeeRequests WHERE CompanyId IS NULL)
+BEGIN
+    UPDATE r SET r.CompanyId = e.CompanyId
+    FROM dbo.tbl_EmployeeRequests r
+    JOIN dbo.Employees e ON r.EmployeeCode = e.EmployeeCode
+    WHERE r.CompanyId IS NULL;
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Req_Comp_Emp')
+    CREATE NONCLUSTERED INDEX IX_Req_Comp_Emp ON dbo.tbl_EmployeeRequests(CompanyId, EmployeeCode);
+GO
+
+-- Bổ sung CompanyId vào tbl_EmployeeDevices
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_EmployeeDevices' AND COLUMN_NAME = 'CompanyId')
+BEGIN
+    ALTER TABLE dbo.tbl_EmployeeDevices ADD CompanyId INT NULL CONSTRAINT FK_Dev_Company REFERENCES dbo.Companies(Id);
+END
+GO
+
+IF EXISTS (SELECT 1 FROM dbo.tbl_EmployeeDevices WHERE CompanyId IS NULL)
+BEGIN
+    UPDATE d SET d.CompanyId = e.CompanyId
+    FROM dbo.tbl_EmployeeDevices d
+    JOIN dbo.Employees e ON d.EmployeeCode = e.EmployeeCode
+    WHERE d.CompanyId IS NULL;
+END
+GO
+
+IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot')
+    DROP INDEX UX_Dev_ActiveSlot ON dbo.tbl_EmployeeDevices;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot')
+    CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_ActiveSlot ON dbo.tbl_EmployeeDevices(CompanyId, EmployeeCode, DeviceType) WHERE IsActiveSlot = 1;
+GO
+
+-- Bổ sung CompanyId vào tbl_DailyPunchSummary & Khóa chính
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_DailyPunchSummary' AND COLUMN_NAME = 'CompanyId')
+BEGIN
+    ALTER TABLE dbo.tbl_DailyPunchSummary ADD CompanyId INT NOT NULL CONSTRAINT DF_DPS_Comp DEFAULT (1);
+END
+GO
+
+IF EXISTS (SELECT 1 FROM dbo.tbl_DailyPunchSummary WHERE CompanyId = 1)
+BEGIN
+    UPDATE s SET s.CompanyId = ISNULL(e.CompanyId, 1)
+    FROM dbo.tbl_DailyPunchSummary s
+    JOIN dbo.Employees e ON s.EmployeeCode = e.EmployeeCode
+    WHERE s.CompanyId = 1;
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE 
+    WHERE TABLE_NAME = 'tbl_DailyPunchSummary' AND CONSTRAINT_NAME = 'PK_DailyPunch' AND COLUMN_NAME = 'CompanyId'
+)
+BEGIN
+    ALTER TABLE dbo.tbl_DailyPunchSummary DROP CONSTRAINT PK_DailyPunch;
+    ALTER TABLE dbo.tbl_DailyPunchSummary ADD CONSTRAINT PK_DailyPunch PRIMARY KEY (CompanyId, EmployeeCode, WorkDate);
+END
+GO
+
+-- Bổ sung CompanyId vào tbl_TimeAdjustments
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_TimeAdjustments' AND COLUMN_NAME = 'CompanyId')
+BEGIN
+    ALTER TABLE dbo.tbl_TimeAdjustments ADD CompanyId INT NULL CONSTRAINT FK_Adj_Company REFERENCES dbo.Companies(Id);
+END
+GO
+
+IF EXISTS (SELECT 1 FROM dbo.tbl_TimeAdjustments WHERE CompanyId IS NULL)
+BEGIN
+    UPDATE a SET a.CompanyId = e.CompanyId
+    FROM dbo.tbl_TimeAdjustments a
+    JOIN dbo.Employees e ON a.EmployeeCode = e.EmployeeCode
+    WHERE a.CompanyId IS NULL;
+END
+GO
+
+IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Adj_Active')
+    DROP INDEX UX_Adj_Active ON dbo.tbl_TimeAdjustments;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Adj_Active')
+    CREATE UNIQUE NONCLUSTERED INDEX UX_Adj_Active ON dbo.tbl_TimeAdjustments(CompanyId, EmployeeCode, WorkDate) WHERE IsActive = 1;
+GO
+
+-- Bổ sung CompanyId vào tbl_EmployeeBranchAssignments
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_EmployeeBranchAssignments' AND COLUMN_NAME = 'CompanyId')
+BEGIN
+    ALTER TABLE dbo.tbl_EmployeeBranchAssignments ADD CompanyId INT NULL CONSTRAINT FK_EBA_Company REFERENCES dbo.Companies(Id);
+END
+GO
+
+IF EXISTS (SELECT 1 FROM dbo.tbl_EmployeeBranchAssignments WHERE CompanyId IS NULL)
+BEGIN
+    UPDATE a SET a.CompanyId = e.CompanyId
+    FROM dbo.tbl_EmployeeBranchAssignments a
+    JOIN dbo.Employees e ON a.EmployeeCode = e.EmployeeCode
+    WHERE a.CompanyId IS NULL;
+END
+GO
+
+IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_EBA_Primary')
+    DROP INDEX UX_EBA_Primary ON dbo.tbl_EmployeeBranchAssignments;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_EBA_Primary')
+    CREATE UNIQUE NONCLUSTERED INDEX UX_EBA_Primary ON dbo.tbl_EmployeeBranchAssignments(CompanyId, EmployeeCode) WHERE IsPrimary = 1 AND ToDate IS NULL;
+GO
+
+-- Bổ sung CompanyId vào tbl_WebAttendanceLogs
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_WebAttendanceLogs' AND COLUMN_NAME = 'CompanyId')
+BEGIN
+    ALTER TABLE dbo.tbl_WebAttendanceLogs ADD CompanyId INT NULL CONSTRAINT FK_Log_Company REFERENCES dbo.Companies(Id);
+END
+GO
+
+IF EXISTS (SELECT 1 FROM dbo.tbl_WebAttendanceLogs WHERE CompanyId IS NULL)
+BEGIN
+    UPDATE l SET l.CompanyId = e.CompanyId
+    FROM dbo.tbl_WebAttendanceLogs l
+    JOIN dbo.Employees e ON l.EmployeeCode = e.EmployeeCode
+    WHERE l.CompanyId IS NULL;
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Log_Comp_Emp_Date')
+    CREATE NONCLUSTERED INDEX IX_Log_Comp_Emp_Date ON dbo.tbl_WebAttendanceLogs(CompanyId, EmployeeCode, WorkDate, CheckTimeUtc);
 GO
 
 

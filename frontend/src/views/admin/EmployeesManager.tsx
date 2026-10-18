@@ -19,7 +19,11 @@ import {
   Calendar,
   X,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  UserMinus,
+  EyeOff,
+  Eye,
+  UserX
 } from 'lucide-react';
 
 interface EmployeesManagerProps {
@@ -79,6 +83,16 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
   const [compOpen, setCompOpen] = useState<number>(0);
   const [savingFund, setSavingFund] = useState(false);
   const [fundMessage, setFundMessage] = useState<string | null>(null);
+
+  // Modal Terminate (Cho nghỉ việc)
+  const [showTerminateModal, setShowTerminateModal] = useState(false);
+  const [terminatingEmp, setTerminatingEmp] = useState<Employee | null>(null);
+  const [terminateDate, setTerminateDate] = useState(new Date().toISOString().split('T')[0]);
+  const [terminateReason, setTerminateReason] = useState('');
+  const [savingTerminate, setSavingTerminate] = useState(false);
+
+  // Bộ lọc hiện/ẩn nhân viên nghỉ việc
+  const [showTerminated, setShowTerminated] = useState(false);
 
   const fetchData = async () => {
     if (!selectedCompany) return;
@@ -212,9 +226,11 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
 
   const handleDeleteEmp = async (e: Employee) => {
     if (!selectedCompany) return;
+
+    // Nếu nhân viên có dữ liệu chấm công, hỏi xóa cưỡng bức (chỉ Admin)
     const confirmed = await toast.confirm({
-      title: 'Xác nhận xóa nhân viên',
-      message: `Bạn có chắc muốn xóa nhân viên ${e.fullName} (${e.employeeCode}) không? Thao tác này không thể hoàn tác.`,
+      title: 'Xóa nhân viên',
+      message: `Muốn xóa nhân viên ${e.fullName} (${e.employeeCode})? Nếu có dữ liệu chấm công, hệ thống sẽ tự động xóa cưỡng bức toàn bộ.`,
       confirmText: 'Xóa nhân viên',
       type: 'danger'
     });
@@ -225,7 +241,52 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
       toast.success(`Đã xóa nhân viên ${e.fullName} thành công.`);
       fetchData();
     } catch (err: any) {
-      toast.error(err.response?.data?.message || 'Không thể xóa nhân viên');
+      const errMsg: string = err.response?.data?.message || '';
+      // Nếu lỗi vì có dữ liệu chấm công -> hỏi xóa cưỡng bức
+      if (errMsg.includes('dữ liệu chấm công') || errMsg.includes('Ngày nghỉ việc')) {
+        const forceConfirmed = await toast.confirm({
+          title: 'Xóa cưỡng bức toàn bộ dữ liệu?',
+          message: `Nhân viên ${e.fullName} đã có dữ liệu chấm công. Xóa sẽ xóa hoàn toàn khỏi hệ thống bao gồm mọi bản ghi chấm công. Không thể phục hồi! Bạn có chắc chắn không?`,
+          confirmText: 'Xóa hoàn toàn',
+          type: 'danger'
+        });
+        if (!forceConfirmed) return;
+        try {
+          const res = await api.delete(`/companies/${selectedCompany.id}/employees/${e.id}/force`);
+          toast.success(res.data?.message || `Đã xóa hoàn toàn nhân viên ${e.fullName}.`);
+          fetchData();
+        } catch (err2: any) {
+          toast.error(err2.response?.data?.message || 'Xóa cưỡng bức thất bại.');
+        }
+      } else {
+        toast.error(errMsg || 'Không thể xóa nhân viên');
+      }
+    }
+  };
+
+  const handleOpenTerminate = (e: Employee) => {
+    setTerminatingEmp(e);
+    setTerminateDate(new Date().toISOString().split('T')[0]);
+    setTerminateReason('');
+    setShowTerminateModal(true);
+  };
+
+  const handleTerminateSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedCompany || !terminatingEmp) return;
+    setSavingTerminate(true);
+    try {
+      const res = await api.post(`/companies/${selectedCompany.id}/employees/${terminatingEmp.id}/terminate`, {
+        endDate: terminateDate,
+        reason: terminateReason
+      });
+      toast.success(res.data?.message || `Đã thiết lập ngày nghỉ việc thành công.`);
+      setShowTerminateModal(false);
+      fetchData();
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || 'Lỗi khi thiết lập ngày nghỉ việc.');
+    } finally {
+      setSavingTerminate(false);
     }
   };
 
@@ -370,11 +431,17 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
     }
   };
 
-  const filteredEmployees = employees.filter((e) =>
-    e.employeeCode.toLowerCase().includes(search.toLowerCase()) ||
-    e.fullName.toLowerCase().includes(search.toLowerCase()) ||
-    (e.departmentName && e.departmentName.toLowerCase().includes(search.toLowerCase()))
-  );
+  const today = new Date().toISOString().split('T')[0];
+  const filteredEmployees = employees.filter((e) => {
+    const isTerminated = e.endDate && e.endDate.split('T')[0] <= today;
+    if (!showTerminated && isTerminated) return false;
+    return (
+      e.employeeCode.toLowerCase().includes(search.toLowerCase()) ||
+      e.fullName.toLowerCase().includes(search.toLowerCase()) ||
+      (e.departmentName && e.departmentName.toLowerCase().includes(search.toLowerCase()))
+    );
+  });
+  const terminatedCount = employees.filter(e => e.endDate && e.endDate.split('T')[0] <= today).length;
 
   if (!selectedCompany) {
     return (
@@ -501,7 +568,20 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
               />
             </div>
 
-            <span className="badge badge-neutral">Tổng cộng: {filteredEmployees.length} nhân viên</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button
+                type="button"
+                className={`btn btn-sm ${showTerminated ? 'btn-primary' : 'btn-secondary'}`}
+                style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+                onClick={() => setShowTerminated(!showTerminated)}
+                title={showTerminated ? "Bấm để ẩn nhân sự đã nghỉ việc" : "Bấm để hiện nhân sự đã nghỉ việc"}
+              >
+                {showTerminated ? <EyeOff size={14} /> : <Eye size={14} />}
+                <span>{showTerminated ? 'Ẩn NV đã nghỉ việc' : `Hiện NV đã nghỉ việc (${terminatedCount})`}</span>
+              </button>
+
+              <span className="badge badge-neutral">Tổng cộng: {filteredEmployees.length} nhân viên</span>
+            </div>
           </div>
 
           <div className="card-body" style={{ padding: 0 }}>
@@ -611,6 +691,14 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
                             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
                               <button
                                 className="btn btn-secondary btn-sm"
+                                style={{ padding: '4px 6px', color: '#ea580c' }}
+                                title={e.endDate ? `Đã nghỉ việc từ ${new Date(e.endDate).toLocaleDateString('vi-VN')} - Bấm để cập nhật` : "Cho nhân viên nghỉ việc"}
+                                onClick={() => handleOpenTerminate(e)}
+                              >
+                                <UserMinus size={13} />
+                              </button>
+                              <button
+                                className="btn btn-secondary btn-sm"
                                 style={{ padding: '4px 6px', color: '#d97706' }}
                                 title="Xem Sổ Cái & Lịch sử nghỉ phép"
                                 onClick={() => handleOpenLeaveLedger(e)}
@@ -629,7 +717,7 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
                                 className="btn btn-secondary btn-sm"
                                 style={{ padding: '4px 6px', color: 'var(--danger)' }}
                                 onClick={() => handleDeleteEmp(e)}
-                                title="Xóa nhân viên"
+                                title="Xóa nhân viên (Có thể xóa cưỡng bức nếu có dữ liệu)"
                               >
                                 <Trash2 size={13} />
                               </button>
@@ -1336,6 +1424,80 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
                 Đóng
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Cho nghỉ việc */}
+      {showTerminateModal && terminatingEmp && (
+        <div className="modal-backdrop">
+          <div className="modal-content" style={{ maxWidth: '480px' }}>
+            <div className="modal-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <UserMinus size={20} color="#ea580c" />
+                <h3 className="modal-title" style={{ margin: 0, fontWeight: 700 }}>Thiết lập Nghỉ việc Nhân sự</h3>
+              </div>
+              <button className="btn-close" onClick={() => setShowTerminateModal(false)}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleTerminateSubmit}>
+              <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                <div style={{ backgroundColor: '#f8fafc', padding: '12px 14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                  <div style={{ fontWeight: 700, fontSize: '15px', color: '#0f172a' }}>{terminatingEmp.fullName}</div>
+                  <div style={{ fontSize: '13px', color: '#64748b', marginTop: '2px' }}>
+                    Mã NV: <strong>{terminatingEmp.employeeCode}</strong> — Bộ phận: {terminatingEmp.departmentName || 'Chưa phân bộ phận'}
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label" style={{ fontWeight: 700 }}>
+                    Ngày chính thức nghỉ việc <span style={{ color: 'red' }}>*</span>
+                  </label>
+                  <input
+                    type="date"
+                    className="form-control"
+                    required
+                    value={terminateDate}
+                    onChange={(e) => setTerminateDate(e.target.value)}
+                  />
+                  <small style={{ color: '#64748b', fontSize: '12px', marginTop: '4px', display: 'block' }}>
+                    Nhân viên nghỉ việc sẽ được tự động ẩn khỏi Bảng chấm công các kỳ sau, giúp BCC luôn gọn gàng và không còn nhân sự đã nghỉ việc.
+                  </small>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label" style={{ fontWeight: 600 }}>Lý do nghỉ việc / Ghi chú</label>
+                  <textarea
+                    className="form-control"
+                    rows={3}
+                    placeholder="Ví dụ: Hết hạn hợp đồng, chuyển công tác, theo nguyện vọng cá nhân..."
+                    value={terminateReason}
+                    onChange={(e) => setTerminateReason(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setShowTerminateModal(false)}
+                  disabled={savingTerminate}
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  className="btn"
+                  style={{ backgroundColor: '#ea580c', borderColor: '#ea580c', color: '#fff', fontWeight: 700 }}
+                  disabled={savingTerminate}
+                >
+                  {savingTerminate ? 'Đang lưu...' : 'Xác nhận Nghỉ việc'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
