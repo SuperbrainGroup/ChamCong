@@ -16,17 +16,20 @@ public class DevicesController : ControllerBase
     private readonly IDeviceService _deviceService;
     private readonly IGeofenceService _geofenceService;
     private readonly AppDbContext _db;
+    private readonly AccessService _access;
     private readonly AuditService _audit;
 
     public DevicesController(
         IDeviceService deviceService,
         IGeofenceService geofenceService,
         AppDbContext db,
+        AccessService access,
         AuditService audit)
     {
         _deviceService = deviceService;
         _geofenceService = geofenceService;
         _db = db;
+        _access = access;
         _audit = audit;
     }
 
@@ -48,16 +51,17 @@ public class DevicesController : ControllerBase
         var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
         if (user == null) return Unauthorized();
 
-        var empCode = user.EmployeeCode;
-        if (string.IsNullOrWhiteSpace(empCode))
-        {
-            return BadRequest(new { code = "NO_EMPLOYEE_LINKED", message = "Tài khoản của bạn chưa được liên kết với hồ sơ nhân viên." });
-        }
-
         var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
-        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == empCode);
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
         if (primaryCompanyId.HasValue) empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
         var emp = await empQuery.FirstOrDefaultAsync(ct);
+
+        if (string.IsNullOrWhiteSpace(user.EmployeeCode) || emp == null)
+        {
+            emp = await _access.EnsureEmployeeProfileAsync(user, primaryCompanyId, ct);
+        }
+
+        var empCode = user.EmployeeCode;
         int? companyId = emp?.CompanyId ?? primaryCompanyId;
 
         var clientIp = _geofenceService.ResolveClientIp(HttpContext);
@@ -94,22 +98,25 @@ public class DevicesController : ControllerBase
     {
         var uid = User.UserId();
         var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
-        if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode))
-        {
-            return BadRequest(new { code = "NO_EMPLOYEE_LINKED", message = "Tài khoản của bạn chưa được liên kết với hồ sơ nhân viên." });
-        }
+        if (user == null) return Unauthorized();
 
         if (string.IsNullOrWhiteSpace(dto.MacAddress))
         {
             return BadRequest(new { code = "NO_MAC_ADDRESS", message = "Địa chỉ MAC máy tính không được để trống." });
         }
 
-        var cleanMac = dto.MacAddress.Trim().ToUpperInvariant();
+        var cleanMac = dto.MacAddress.Trim().ToUpperInvariant().Replace("-", ":");
 
         var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
         var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
         if (primaryCompanyId.HasValue) empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
         var emp = await empQuery.FirstOrDefaultAsync(ct);
+
+        if (string.IsNullOrWhiteSpace(user.EmployeeCode) || emp == null)
+        {
+            emp = await _access.EnsureEmployeeProfileAsync(user, primaryCompanyId, ct);
+        }
+
         int? companyId = emp?.CompanyId ?? primaryCompanyId;
 
         // 1. Ràng buộc: Mỗi địa chỉ MAC chỉ được đăng ký cho 1 nhân viên duy nhất trong cùng hội sở (Chống check-in hộ)
@@ -201,20 +208,23 @@ public class DevicesController : ControllerBase
     public async Task<IActionResult> GetMyDevices(CancellationToken ct)
     {
         var uid = User.UserId();
-        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
-        if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode))
-        {
-            return Ok(new { mobile = (object?)null, pc = (object?)null });
-        }
+        var user = await _db.Users.Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
+        if (user == null) return Unauthorized();
 
         var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+        if (string.IsNullOrWhiteSpace(user.EmployeeCode))
+        {
+            await _access.EnsureEmployeeProfileAsync(user, primaryCompanyId, ct);
+        }
+
         var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
         if (primaryCompanyId.HasValue) empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
         var emp = await empQuery.FirstOrDefaultAsync(ct);
         int? companyId = emp?.CompanyId ?? primaryCompanyId;
 
         var devices = await _deviceService.GetMyDevicesAsync(user.EmployeeCode, companyId, ct);
-        var mobile = devices.FirstOrDefault(d => d.DeviceType == "MOBILE" && d.IsActiveSlot);
+        var activeMobiles = devices.Where(d => d.DeviceType == "MOBILE" && d.IsActiveSlot).ToList();
+        var mobile = activeMobiles.FirstOrDefault();
         var pc = devices.FirstOrDefault(d => d.DeviceType == "PC" && d.IsActiveSlot);
 
         return Ok(new
@@ -231,6 +241,18 @@ public class DevicesController : ControllerBase
                 fingerprintHash = mobile.FingerprintHash,
                 macAddress = mobile.FingerprintHash
             },
+            mobileDevices = activeMobiles.Select(m => new
+            {
+                m.DeviceBindingId,
+                m.DeviceName,
+                m.OperatingSystem,
+                m.BrowserInfo,
+                m.ApprovalStatus,
+                m.RequestedAtUtc,
+                m.LastUsedAtUtc,
+                fingerprintHash = m.FingerprintHash,
+                macAddress = m.FingerprintHash
+            }),
             pc = pc == null ? null : new
             {
                 pc.DeviceBindingId,
@@ -330,7 +352,7 @@ public class HrDevicesController : ControllerBase
 
     public record UpdateMacDto(string MacAddress);
 
-    /// <summary>HCNS cập nhật địa chỉ MAC cho thiết bị PC của nhân viên.</summary>
+    /// <summary>HCNS cập nhật hoặc xóa địa chỉ MAC cho thiết bị PC của nhân viên.</summary>
     [HttpPut("{id}/mac")]
     public async Task<IActionResult> UpdateDeviceMac(int id, [FromBody] UpdateMacDto dto, CancellationToken ct)
     {
@@ -341,12 +363,78 @@ public class HrDevicesController : ControllerBase
 
         await _access.EnsureEmployeeCodeAsync(devTarget.EmployeeCode, devTarget.CompanyId, ct);
 
-        devTarget.FingerprintHash = dto.MacAddress?.Trim().ToUpperInvariant();
+        var clean = dto.MacAddress?.Trim().ToUpperInvariant().Replace("-", ":");
+        if (string.IsNullOrWhiteSpace(clean))
+        {
+            devTarget.FingerprintHash = null;
+            await _db.SaveChangesAsync(ct);
+            _audit.Log("Device", id, "UpdateDeviceMac", $"Xóa hoàn toàn địa chỉ MAC của NV {devTarget.EmployeeCode}");
+            return Ok(new { message = "Đã xóa hoàn toàn địa chỉ MAC của thiết bị thành công.", macAddress = (string?)null });
+        }
+
+        // Kiểm tra xem MAC đã bị nhân viên khác trong cùng hội sở đăng ký chưa
+        var occupiedByOther = await _db.EmployeeDevices.AsNoTracking().FirstOrDefaultAsync(d =>
+            d.DeviceType == "PC" &&
+            d.FingerprintHash == clean &&
+            d.EmployeeCode != devTarget.EmployeeCode &&
+            d.DeviceBindingId != devTarget.DeviceBindingId &&
+            (devTarget.CompanyId == null ? d.CompanyId == null : d.CompanyId == devTarget.CompanyId) &&
+            d.IsActiveSlot, ct);
+
+        if (occupiedByOther != null)
+        {
+            return StatusCode(409, new
+            {
+                code = "MAC_ALREADY_REGISTERED",
+                message = $"Địa chỉ MAC ({clean}) đã được gán cho nhân viên {occupiedByOther.EmployeeCode} trong cùng hội sở. Mỗi máy tính chỉ được dùng cho 1 nhân viên trong cùng hội sở để chống chấm công hộ."
+            });
+        }
+
+        devTarget.FingerprintHash = clean;
         devTarget.ApprovalStatus = "APPROVED";
         await _db.SaveChangesAsync(ct);
 
         _audit.Log("Device", id, "UpdateDeviceMac", $"Cập nhật MAC: {devTarget.FingerprintHash} cho NV {devTarget.EmployeeCode}");
         return Ok(new { message = "Đã cập nhật địa chỉ MAC cho thiết bị thành công.", macAddress = devTarget.FingerprintHash });
+    }
+
+    /// <summary>HCNS xóa hoàn toàn địa chỉ MAC của thiết bị PC.</summary>
+    [HttpDelete("{id}/mac")]
+    public async Task<IActionResult> DeleteDeviceMac(int id, CancellationToken ct)
+    {
+        if (!User.IsHR()) return StatusCode(403, new { message = "Bạn không có quyền HCNS." });
+
+        var devTarget = await _db.EmployeeDevices.FirstOrDefaultAsync(d => d.DeviceBindingId == id, ct);
+        if (devTarget == null) return NotFound(new { message = "Không tìm thấy thiết bị." });
+
+        await _access.EnsureEmployeeCodeAsync(devTarget.EmployeeCode, devTarget.CompanyId, ct);
+
+        var oldMac = devTarget.FingerprintHash;
+        devTarget.FingerprintHash = null;
+        await _db.SaveChangesAsync(ct);
+
+        _audit.Log("Device", id, "DeleteDeviceMac", $"Xóa hoàn toàn địa chỉ MAC ({oldMac}) của NV {devTarget.EmployeeCode}");
+        return Ok(new { message = "Đã xóa hoàn toàn địa chỉ MAC của thiết bị thành công." });
+    }
+
+    /// <summary>HCNS xóa hoàn toàn thiết bị khỏi hệ thống.</summary>
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> DeleteDevice(int id, CancellationToken ct)
+    {
+        if (!User.IsHR()) return StatusCode(403, new { message = "Bạn không có quyền HCNS." });
+
+        var devTarget = await _db.EmployeeDevices.FirstOrDefaultAsync(d => d.DeviceBindingId == id, ct);
+        if (devTarget == null) return NotFound(new { message = "Không tìm thấy thiết bị." });
+
+        await _access.EnsureEmployeeCodeAsync(devTarget.EmployeeCode, devTarget.CompanyId, ct);
+
+        var tokens = await _db.RefreshTokens.Where(t => t.DeviceBindingId == id).ToListAsync(ct);
+        _db.RefreshTokens.RemoveRange(tokens);
+        _db.EmployeeDevices.Remove(devTarget);
+        await _db.SaveChangesAsync(ct);
+
+        _audit.Log("Device", id, "DeleteDevice", $"Xóa hoàn toàn thiết bị #{id} ({devTarget.DeviceType} - {devTarget.DeviceName}) của NV {devTarget.EmployeeCode}");
+        return Ok(new { message = "Đã xóa hoàn toàn thiết bị thành công." });
     }
 
     /// <summary>HCNS thu hồi (Reset) thiết bị cũ khi nhân viên đổi máy hoặc mất máy.</summary>

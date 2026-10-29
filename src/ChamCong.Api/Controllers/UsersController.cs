@@ -42,8 +42,8 @@ public class UsersController : ControllerBase
         DateTime CreatedAt,
         List<int> AssignedCompanyIds);
 
-    public record CreateUserDto(string Username, string FullName, string Password, string Role, List<int> AssignedCompanyIds);
-    public record UpdateUserDto(string FullName, string Role, bool IsActive, List<int> AssignedCompanyIds);
+    public record CreateUserDto(string Username, string FullName, string Password, string Role, List<int> AssignedCompanyIds, string? EmployeeCode = null);
+    public record UpdateUserDto(string FullName, string Role, bool IsActive, List<int> AssignedCompanyIds, string? EmployeeCode = null);
     public record ResetPasswordDto(string NewPassword);
 
     [HttpGet]
@@ -195,6 +195,17 @@ public class UsersController : ControllerBase
             await _db.SaveChangesAsync(ct);
         }
 
+        if (!string.IsNullOrWhiteSpace(dto.EmployeeCode))
+        {
+            user.EmployeeCode = dto.EmployeeCode.Trim();
+        }
+        else if (requestedRole == Roles.HR || requestedRole == Roles.Employee)
+        {
+            user.EmployeeCode = requestedRole == Roles.HR ? $"HR{user.Id:D3}" : $"EMP{user.Id:D3}";
+        }
+        await _db.SaveChangesAsync(ct);
+        await _access.EnsureEmployeeProfileAsync(user, dto.AssignedCompanyIds?.FirstOrDefault(), ct);
+
         _audit.Log("User", user.Id, "Create", new { username, fullName, role = requestedRole, companies = dto.AssignedCompanyIds });
         await _db.SaveChangesAsync(ct);
 
@@ -282,7 +293,12 @@ public class UsersController : ControllerBase
         }
 
         _audit.Log("User", user.Id, "Update", new { fullName, role = requestedRole, isActive = dto.IsActive, companies = dto.AssignedCompanyIds });
+        if (!string.IsNullOrWhiteSpace(dto.EmployeeCode))
+        {
+            user.EmployeeCode = dto.EmployeeCode.Trim();
+        }
         await _db.SaveChangesAsync(ct);
+        await _access.EnsureEmployeeProfileAsync(user, dto.AssignedCompanyIds?.FirstOrDefault(), ct);
 
         return Ok(new { message = "Cập nhật tài khoản thành công." });
     }
@@ -356,5 +372,73 @@ public class UsersController : ControllerBase
         await _db.SaveChangesAsync(ct);
 
         return Ok(new { message = user.IsLocked ? "Đã khóa tài khoản." : "Đã mở khóa tài khoản.", isLocked = user.IsLocked });
+    }
+
+    /// <summary>Xóa vĩnh viễn tài khoản người dùng khỏi hệ thống (chỉ Quản trị viên Admin).</summary>
+    [HttpDelete("{id}")]
+    [Authorize(Roles = Roles.Admin)]
+    public async Task<IActionResult> Delete(int id, CancellationToken ct)
+    {
+        if (!User.IsAdmin())
+        {
+            return StatusCode(403, new { message = "Chỉ Quản trị viên hệ thống (Admin) mới có quyền xóa tài khoản người dùng." });
+        }
+
+        var currentUserId = User.UserId();
+        if (currentUserId == id)
+        {
+            return BadRequest(new { message = "Bạn không thể tự xóa tài khoản của chính mình đang đăng nhập." });
+        }
+
+        var user = await _db.Users
+            .Include(u => u.Companies)
+            .FirstOrDefaultAsync(u => u.Id == id, ct);
+        if (user == null) return NotFound(new { message = "Không tìm thấy tài khoản người dùng." });
+
+        // Nếu là tài khoản Admin, đảm bảo còn ít nhất một Admin khác đang hoạt động
+        if (user.Role == Roles.Admin)
+        {
+            var otherActiveAdminCount = await _db.Users.CountAsync(u => u.Role == Roles.Admin && u.IsActive && u.Id != id, ct);
+            if (otherActiveAdminCount == 0)
+            {
+                return BadRequest(new { message = "Không thể xóa tài khoản này vì đây là Quản trị viên (Admin) duy nhất đang hoạt động." });
+            }
+        }
+
+        // Dọn dẹp dữ liệu phụ thuộc của user
+        // 1. Phân quyền hội sở
+        if (user.Companies.Count > 0)
+        {
+            _db.UserCompanies.RemoveRange(user.Companies);
+        }
+
+        // 2. Vai trò đa nhiệm tbl_UserRoles
+        var userRoles = await _db.UserRoles.Where(ur => ur.UserId == id).ToListAsync(ct);
+        if (userRoles.Count > 0) _db.UserRoles.RemoveRange(userRoles);
+
+        // 3. Phạm vi chi nhánh tbl_HrBranchScopes
+        var scopes = await _db.HrBranchScopes.Where(h => h.UserId == id).ToListAsync(ct);
+        if (scopes.Count > 0) _db.HrBranchScopes.RemoveRange(scopes);
+
+        // 4. Token đăng nhập tbl_RefreshTokens
+        var tokens = await _db.RefreshTokens.Where(rt => rt.UserId == id).ToListAsync(ct);
+        if (tokens.Count > 0) _db.RefreshTokens.RemoveRange(tokens);
+
+        // 5. Thông báo nhận tbl_Notifications
+        var notis = await _db.Notifications.Where(n => n.UserId == id).ToListAsync(ct);
+        if (notis.Count > 0) _db.Notifications.RemoveRange(notis);
+
+        // 6. Gỡ tham chiếu DecidedByUserId trên EmployeeDevices
+        var decidedDevices = await _db.EmployeeDevices.Where(d => d.DecidedByUserId == id).ToListAsync(ct);
+        foreach (var d in decidedDevices)
+        {
+            d.DecidedByUserId = null;
+        }
+
+        _db.Users.Remove(user);
+        _audit.Log("User", user.Id, "Delete", $"Xóa vĩnh viễn tài khoản @{user.Username} ({user.FullName}, Role: {user.Role})");
+
+        await _db.SaveChangesAsync(ct);
+        return Ok(new { message = $"Đã xóa vĩnh viễn tài khoản @{user.Username} thành công." });
     }
 }

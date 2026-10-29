@@ -21,13 +21,17 @@ export const ParametersManager: React.FC<ParametersManagerProps> = ({ onBack }) 
     lunchMinutes: number;
     checkoutPrepareMinutes: number;
     checkoutStartTime: string;
+    gracePeriodMinutes: number;
+    graceMaxTimesMonth: number;
   }>({
     shiftStart: '08:00',
     shiftEnd: '17:00',
     lunchStart: '12:00',
     lunchMinutes: 60,
     checkoutPrepareMinutes: 30,
-    checkoutStartTime: '16:30'
+    checkoutStartTime: '16:30',
+    gracePeriodMinutes: 10,
+    graceMaxTimesMonth: 2
   });
   const [savingShift, setSavingShift] = useState(false);
   const [shiftSuccessMsg, setShiftSuccessMsg] = useState<string | null>(null);
@@ -57,7 +61,9 @@ export const ParametersManager: React.FC<ParametersManagerProps> = ({ onBack }) 
         lunchStart: res.lunchStart,
         lunchMinutes: res.lunchMinutes,
         checkoutPrepareMinutes: res.checkoutPrepareMinutes,
-        checkoutStartTime: res.checkoutStartTime
+        checkoutStartTime: res.checkoutStartTime,
+        gracePeriodMinutes: res.gracePeriodMinutes ?? 10,
+        graceMaxTimesMonth: res.graceMaxTimesMonth ?? 2
       });
     } catch (err) {
       console.error('Lỗi tải ca làm việc:', err);
@@ -93,7 +99,9 @@ export const ParametersManager: React.FC<ParametersManagerProps> = ({ onBack }) 
         shiftEnd: shiftHours.shiftEnd,
         lunchStart: shiftHours.lunchStart,
         lunchMinutes: Number(shiftHours.lunchMinutes),
-        checkoutPrepareMinutes: Number(shiftHours.checkoutPrepareMinutes)
+        checkoutPrepareMinutes: Number(shiftHours.checkoutPrepareMinutes),
+        gracePeriodMinutes: Number(shiftHours.gracePeriodMinutes),
+        graceMaxTimesMonth: Number(shiftHours.graceMaxTimesMonth)
       });
       setShiftSuccessMsg(res.message);
       await fetchParams();
@@ -408,6 +416,51 @@ export const ParametersManager: React.FC<ParametersManagerProps> = ({ onBack }) 
                 Ví dụ: 12:00, 60 phút nghỉ trưa
               </div>
             </div>
+
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: '#334155', marginBottom: '6px' }}>
+                Du di & Số lần miễn trễ / tháng
+              </label>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  type="number"
+                  min="0"
+                  max="120"
+                  value={shiftHours.gracePeriodMinutes}
+                  onChange={(e) => setShiftHours({ ...shiftHours, gracePeriodMinutes: Number(e.target.value) })}
+                  title="Thời gian du di (phút)"
+                  placeholder="Phút du di"
+                  style={{
+                    width: '50%',
+                    padding: '9px 10px',
+                    borderRadius: '8px',
+                    border: '1px solid #CBD5E1',
+                    fontSize: '14px',
+                    fontWeight: 600
+                  }}
+                />
+                <input
+                  type="number"
+                  min="0"
+                  max="31"
+                  value={shiftHours.graceMaxTimesMonth}
+                  onChange={(e) => setShiftHours({ ...shiftHours, graceMaxTimesMonth: Number(e.target.value) })}
+                  title="Số lần tối đa được du di trong tháng"
+                  placeholder="Lần/tháng"
+                  style={{
+                    width: '50%',
+                    padding: '9px 10px',
+                    borderRadius: '8px',
+                    border: '1px solid #CBD5E1',
+                    fontSize: '14px',
+                    fontWeight: 600
+                  }}
+                />
+              </div>
+              <div style={{ fontSize: '11px', color: '#64748B', marginTop: '4px' }}>
+                Ví dụ: 10 phút, 2 lần/tháng (vượt số lần tính trễ)
+              </div>
+            </div>
           </div>
 
           {/* DÒNG TÓM TẮT CƠ CHẾ NHẬN DIỆN THỜI GIAN THỰC */}
@@ -427,7 +480,7 @@ export const ParametersManager: React.FC<ParametersManagerProps> = ({ onBack }) 
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <Sparkles size={16} color="#0056B3" />
               <span>
-                <strong>Cơ chế tự động nhận diện:</strong> Từ <strong>{shiftHours.checkoutStartTime}</strong>, nhân viên đã check-in sẽ hiển thị nút <strong>Check-out</strong>. Nhân viên <strong>chưa check-in</strong> lúc sáng sẽ hiển thị trạng thái <strong>Chưa check-in — Cần giải trình</strong> kèm nút gửi giải trình bổ sung công.
+                <strong>Cơ chế tự động:</strong> Miễn tính trễ khi vào muộn $\le$ <strong>{shiftHours.gracePeriodMinutes} phút</strong> (tối đa <strong>{shiftHours.graceMaxTimesMonth} lần/tháng</strong>, vượt lần tính trễ bình thường). Từ <strong>{shiftHours.checkoutStartTime}</strong>, nhân viên đã check-in sẽ hiển thị nút <strong>Check-out</strong>. Nhân viên <strong>chưa check-in</strong> lúc sáng sẽ hiển thị trạng thái <strong>Chưa check-in — Cần giải trình</strong>.
               </span>
             </div>
 

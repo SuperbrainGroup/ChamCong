@@ -47,6 +47,7 @@ public class AppDbContext : DbContext
     public DbSet<HrAlert> HrAlerts => Set<HrAlert>();
     public DbSet<SecurityAuditLog> SecurityAuditLogs => Set<SecurityAuditLog>();
     public DbSet<PlatformSetting> PlatformSettings => Set<PlatformSetting>();
+    public DbSet<WorkSchedule> WorkSchedules => Set<WorkSchedule>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -61,6 +62,7 @@ public class AppDbContext : DbContext
             e.ToTable("Employees");
             e.Property(x => x.StartDate).HasColumnType("date");
             e.Property(x => x.EndDate).HasColumnType("date");
+            e.Property(x => x.EmployeeType).HasMaxLength(20).HasDefaultValue("STANDARD");
         });
         b.Entity<AttendanceCode>(e =>
         {
@@ -266,6 +268,16 @@ public class AppDbContext : DbContext
             e.ToTable("tbl_PlatformSettings").HasKey(x => x.SettingKey);
             e.Property(x => x.SettingKey).HasMaxLength(50);
             e.Property(x => x.UpdatedAtUtc).HasColumnType("datetime2(0)");
+        });
+        b.Entity<WorkSchedule>(e =>
+        {
+            e.ToTable("tbl_WorkSchedules").HasKey(x => x.ScheduleId);
+            e.Property(x => x.WorkDate).HasColumnType("date");
+            e.Property(x => x.EmployeeCode).HasMaxLength(30);
+            e.Property(x => x.ShiftCode).HasMaxLength(20);
+            e.Property(x => x.Status).HasMaxLength(20);
+            e.Property(x => x.RegisteredBy).HasMaxLength(50);
+            e.Property(x => x.RegisteredAtUtc).HasColumnType("datetime2(0)");
         });
 
         foreach (var entity in b.Model.GetEntityTypes())

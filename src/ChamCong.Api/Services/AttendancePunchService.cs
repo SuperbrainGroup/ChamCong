@@ -142,6 +142,13 @@ public class AttendancePunchService : IAttendancePunchService
         }
         else
         {
+            // Bắt buộc phải có vị trí GPS khi chấm công bằng điện thoại (Mobile)
+            // Không cho phép chấm công bằng điện thoại mà không có GPS (tránh phát sinh GPS_DRIFT do thiếu vị trí)
+            if (!request.Latitude.HasValue || !request.Longitude.HasValue || !string.IsNullOrWhiteSpace(request.GpsError))
+            {
+                throw AppException.Bad("Hệ thống yêu cầu bắt buộc phải có vị trí GPS khi chấm công bằng điện thoại. Không cho phép chấm công khi không có GPS (GPS_DRIFT). Vui lòng bật định vị GPS trên điện thoại và cấp quyền truy cập vị trí.");
+            }
+
             // Đối với thiết bị checkin là Mobile: kiểm tra thiết bị đã duyệt qua device secret
             device = await _deviceService.ValidateDeviceSecretAsync(employeeCode, rawDeviceSecret, companyId, ct);
             if (device == null)
@@ -238,12 +245,43 @@ public class AttendancePunchService : IAttendancePunchService
         }
 
         // 5. Đánh giá hiện diện:
+        // Remote: Điểm danh tại nhà/từ xa được miễn IP & GPS văn phòng, tự động ghi nhận VALID
         // PC: Chỉ kiểm tra MAC Address (đã xác thực ở Bước 1), KHÔNG kiểm tra Wifi và Location.
         // Mobile: Không kiểm tra MAC, CHỈ kiểm tra Wifi và Location (GPS).
+        var isRemote = string.Equals(emp?.EmployeeType, "REMOTE", StringComparison.OrdinalIgnoreCase);
         var isPc = request.Channel == "PC_WEB";
         BranchPresenceResult eval;
 
-        if (isPc)
+        if (isRemote)
+        {
+            string? branchCode = null;
+            var branchAssign = await _db.EmployeeBranchAssignments
+                .AsNoTracking()
+                .Where(a => a.EmployeeCode == employeeCode && (effectiveCompanyId == null || a.CompanyId == null || a.CompanyId == effectiveCompanyId) && (a.ToDate == null || a.ToDate >= DateTime.Today))
+                .FirstOrDefaultAsync(ct);
+            if (branchAssign != null)
+            {
+                branchCode = branchAssign.BranchCode;
+            }
+            else if (emp?.CompanyId != null)
+            {
+                var comp = await _db.Companies.AsNoTracking().FirstOrDefaultAsync(c => c.Id == emp.CompanyId, ct);
+                branchCode = comp?.Code;
+            }
+
+            eval = new BranchPresenceResult
+            {
+                DetectedBranchCode = branchCode,
+                IpOk = true,
+                GpsState = "NA",
+                DistanceMeters = null,
+                VerificationStatus = "VALID",
+                ReasonCode = "REMOTE_HOME_PUNCH",
+                ReviewState = "NONE",
+                Message = "Điểm danh làm việc từ xa (Remote/Tại nhà) thành công."
+            };
+        }
+        else if (isPc)
         {
             string? branchCode = null;
             var branchAssign = await _db.EmployeeBranchAssignments
@@ -274,6 +312,13 @@ public class AttendancePunchService : IAttendancePunchService
         }
         else
         {
+            // Bắt buộc phải có vị trí GPS khi chấm công bằng điện thoại (Mobile)
+            // Không cho phép chấm công bằng điện thoại mà không có GPS (tránh phát sinh GPS_DRIFT do thiếu vị trí)
+            if (!request.Latitude.HasValue || !request.Longitude.HasValue || !string.IsNullOrWhiteSpace(request.GpsError))
+            {
+                throw AppException.Bad("Hệ thống yêu cầu bắt buộc phải có vị trí GPS khi chấm công bằng điện thoại. Không cho phép chấm công khi không có GPS (GPS_DRIFT). Vui lòng bật định vị GPS trên điện thoại và cấp quyền truy cập vị trí.");
+            }
+
             eval = await _geofenceService.EvaluatePresenceAsync(
                 employeeCode,
                 clientIp,
@@ -285,6 +330,11 @@ public class AttendancePunchService : IAttendancePunchService
                 policy,
                 companyId,
                 ct);
+
+            if (eval.GpsState == "MISSING")
+            {
+                throw AppException.Bad("Không xác định được tọa độ GPS của thiết bị di động. Bắt buộc phải có định vị GPS hợp lệ để chấm công.");
+            }
 
             if (eval.ReasonCode == "BRANCH_NO_PUBLIC_IP")
             {
@@ -306,6 +356,59 @@ public class AttendancePunchService : IAttendancePunchService
             ? $"{request.UserAgent} [MAC: {request.MacAddress}]"
             : request.UserAgent;
 
+        // Cắt gọt và chuẩn hóa an toàn tuyệt đối mọi trường dữ liệu trước khi lưu vào DB (chống Arithmetic overflow & String truncation)
+        decimal? safeLat = null;
+        if (!isPc && request.Latitude.HasValue)
+        {
+            var clamped = Math.Clamp(request.Latitude.Value, -90m, 90m);
+            safeLat = Math.Round(clamped, 7);
+        }
+
+        decimal? safeLng = null;
+        if (!isPc && request.Longitude.HasValue)
+        {
+            var clamped = Math.Clamp(request.Longitude.Value, -180m, 180m);
+            safeLng = Math.Round(clamped, 7);
+        }
+
+        decimal? safeAcc = null;
+        if (!isPc && request.Accuracy.HasValue)
+        {
+            // Cột GpsAccuracyMeters là decimal(7,2) -> Max là 99999.99m (~100km)
+            var clamped = Math.Clamp(request.Accuracy.Value, 0m, 99999.99m);
+            safeAcc = Math.Round(clamped, 2);
+        }
+
+        decimal? safeDist = null;
+        if (!isPc && eval.DistanceMeters.HasValue)
+        {
+            // Cột DistanceMeters là decimal(9,2) -> Max là 9999999.99m (~10.000km)
+            var clamped = Math.Clamp((decimal)eval.DistanceMeters.Value, 0m, 9999999.99m);
+            safeDist = Math.Round(clamped, 2);
+        }
+
+        var safeIp = clientIp ?? "127.0.0.1";
+        if (safeIp.Length > 45) safeIp = safeIp.Substring(0, 45);
+
+        var safeUserAgent = userAgentInfo;
+        if (safeUserAgent != null && safeUserAgent.Length > 300)
+        {
+            safeUserAgent = safeUserAgent.Substring(0, 300);
+        }
+
+        // Đảm bảo GpsState luôn nằm trong CHECK constraint ('OK','OUT','LOW_ACC','MISSING','NA')
+        var safeGpsState = isPc ? "NA" : (eval.GpsState ?? "NA");
+        if (safeGpsState != "OK" && safeGpsState != "OUT" && safeGpsState != "LOW_ACC" && safeGpsState != "MISSING" && safeGpsState != "NA")
+        {
+            safeGpsState = "NA";
+        }
+
+        var safeReasonCode = eval.ReasonCode;
+        if (safeReasonCode != null && safeReasonCode.Length > 30)
+        {
+            safeReasonCode = safeReasonCode.Substring(0, 30);
+        }
+
         var log = new WebAttendanceLog
         {
             CompanyId = effectiveCompanyId,
@@ -317,43 +420,52 @@ public class AttendancePunchService : IAttendancePunchService
             WorkDate = workDate,
             DetectedBranchCode = eval.DetectedBranchCode,
             CheckinPolicy = isPc ? "PC_MAC_AUTH" : policy,
-            Latitude = isPc ? null : request.Latitude,
-            Longitude = isPc ? null : request.Longitude,
-            GpsAccuracyMeters = isPc ? null : request.Accuracy,
-            DistanceMeters = isPc ? null : (eval.DistanceMeters.HasValue ? (decimal?)eval.DistanceMeters.Value : null),
-            ClientPublicIP = clientIp,
+            Latitude = safeLat,
+            Longitude = safeLng,
+            GpsAccuracyMeters = safeAcc,
+            DistanceMeters = safeDist,
+            ClientPublicIP = safeIp,
             IpOk = isPc ? true : eval.IpOk,
-            GpsState = isPc ? "NA" : eval.GpsState,
+            GpsState = safeGpsState,
             VerificationStatus = eval.VerificationStatus,
-            ReasonCode = eval.ReasonCode,
+            ReasonCode = safeReasonCode,
             ReviewState = eval.ReviewState,
-            UserAgent = userAgentInfo
+            UserAgent = safeUserAgent
         };
 
         _db.WebAttendanceLogs.Add(log);
 
         // Cập nhật thông tin thiết bị
         device.LastUsedAtUtc = nowUtc;
-        device.LastUsedPublicIP = clientIp;
+        device.LastUsedPublicIP = safeIp;
 
         await _db.SaveChangesAsync(ct);
 
         // Tự động gửi thông báo nhắc nhở giải trình cho nhân viên nếu quẹt ra về khi chưa check-in vào ca
         if (isUncheckedInCheckout)
         {
-            var userObj = await _db.Users.FirstOrDefaultAsync(u => u.EmployeeCode == employeeCode && (effectiveCompanyId == null || u.Companies.Any(c => c.CompanyId == effectiveCompanyId)), ct);
-            if (userObj != null)
+            try
             {
-                _db.Notifications.Add(new Notification
+                var userObj = await _db.Users.FirstOrDefaultAsync(u => u.EmployeeCode == employeeCode && (effectiveCompanyId == null || u.Companies.Any(c => c.CompanyId == effectiveCompanyId)), ct);
+                if (userObj != null)
                 {
-                    UserId = userObj.Id,
-                    Title = "⚠️ Nhắc nhở nộp đơn giải trình bổ sung giờ vào",
-                    Body = $"Bạn vừa điểm danh ra về lúc {nowLocal:HH:mm}. Ca làm việc hôm nay chưa có lượt vào làm, vui lòng tạo đơn giải trình để được ghi nhận công.",
-                    LinkType = "REGULARIZATION",
-                    CreatedAtUtc = DateTime.UtcNow,
-                    IsRead = false
-                });
-                await _db.SaveChangesAsync(ct);
+                    _db.Notifications.Add(new Notification
+                    {
+                        UserId = userObj.Id,
+                        CompanyId = effectiveCompanyId,
+                        BranchCode = eval.DetectedBranchCode,
+                        Title = "⚠️ Nhắc nhở nộp đơn giải trình bổ sung giờ vào",
+                        Body = $"Bạn vừa điểm danh ra về lúc {nowLocal:HH:mm}. Ca làm việc hôm nay chưa có lượt vào làm, vui lòng tạo đơn giải trình để được ghi nhận công.",
+                        LinkType = "REGULARIZATION",
+                        CreatedAtUtc = DateTime.UtcNow,
+                        IsRead = false
+                    });
+                    await _db.SaveChangesAsync(ct);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Không thể gửi thông báo nhắc nhở giải trình: {Message}", ex.Message);
             }
         }
 
@@ -370,7 +482,14 @@ public class AttendancePunchService : IAttendancePunchService
         // 8. Kiểm tra cảnh báo đổi Public IP văn phòng nếu cờ là OFF_NETWORK nhưng GPS OK
         if (eval.ReasonCode == "OFF_NETWORK" && eval.DetectedBranchCode != null)
         {
-            await CheckAndRaiseIpDriftAlertAsync(eval.DetectedBranchCode, clientIp, ct);
+            try
+            {
+                await CheckAndRaiseIpDriftAlertAsync(eval.DetectedBranchCode, clientIp, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Không thể kiểm tra hoặc tạo cảnh báo IP Drift: {Message}", ex.Message);
+            }
         }
 
         return new PunchResultDto
@@ -560,7 +679,7 @@ public class AttendancePunchService : IAttendancePunchService
                         existingRaw.OutTime = outStr;
                         existingRaw.Source = "REGULARIZED";
                     }
-                    else if (existingRaw.Source == "APP")
+                    else if (existingRaw.Source == "APP" || existingRaw.Source == "REGULARIZED")
                     {
                         existingRaw.InMin = inMin;
                         existingRaw.OutMin = outMin;

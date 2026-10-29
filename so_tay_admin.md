@@ -32,9 +32,9 @@ Tài khoản Quản trị viên (`admin`) sở hữu quyền hạn cao nhất tr
 
 > [!TIP]
 > **Các tính năng vận hành thông minh & bảo mật cao**:
-> - **Ghi nhớ đăng nhập an toàn (Remember Me)**: Sử dụng mô hình Refresh Token xoay vòng (Rotated Refresh Tokens) thời hạn đến 90 ngày, kết hợp Access Token ngắn hạn và cơ chế phát hiện giả mạo. Tuyệt đối không lưu mật khẩu trần tại trình duyệt.
-> - **Định tuyến giữ nguyên màn hình khi Refresh (F5)**: Hệ thống đồng bộ URL Hash (`#/admin-parameters`, `#/admin-leave`, `#/operator`...) cùng LocalStorage. Bất kỳ thao tác F5, tải lại trang hay bấm nút Back/Forward của trình duyệt đều giữ nguyên vẹn phân hệ làm việc hiện tại của Quản trị viên.
-> - **Khóa an toàn 30 phút giữa Check-in và Check-out**: Được kiểm soát chặt chẽ ở cả tầng Frontend và tầng Backend (`AttendancePunchService`), ngăn ngừa triệt để lỗi quẹt thẻ nhầm hoặc bấm liên tiếp nhiều lần.
+> - **Ghi nhớ đăng nhập an toàn**: Giúp bạn duy trì phiên làm việc tiện lợi suốt cả kỳ công mà không sợ bị lộ mật khẩu, mở lại trình duyệt không cần nhập lại từ đầu.
+> - **Giữ nguyên màn hình khi tải lại trang (F5)**: Khi đang thao tác ở bất kỳ màn hình nào (Bảng tính công, Tham số, Quản lý đơn từ...), dù bạn bấm F5 hay quay lại trang trước, hệ thống luôn giữ nguyên đúng màn hình bạn đang làm việc.
+> - **Khóa an toàn 30 phút chống bấm nhầm**: Tự động khóa nút ra về trong 30 phút đầu tiên sau khi nhân viên vừa bấm vào làm, triệt tiêu hoàn toàn lỗi quẹt thẻ nhầm.
 
 ---
 
@@ -90,15 +90,15 @@ Khi nhân viên quên mật khẩu hoặc nhập sai quá 5 lần bị tạm kh�
 # 4. QUẢN LÝ THIẾT BỊ: RESET MÁY KHI NHÂN VIÊN ĐỔI THIẾT BỊ
 
 Để chống gian lận, hệ thống áp dụng nguyên tắc **1 Máy = 1 Tài khoản**:
-- Máy tính PC được gắn với **Địa chỉ MAC** của card mạng.
-- Điện thoại được gắn với **Mã định danh thiết bị (Device ID)**.
+- Máy tính PC được gắn với mã nhận diện riêng của máy.
+- Điện thoại được gắn với mã nhận diện riêng của điện thoại đó.
 
 ### Khi nhân viên mua máy tính mới hoặc đổi điện thoại:
 1. Nhân viên khi dùng máy mới sẽ nhận thông báo: *"Tài khoản đã được gắn với thiết bị khác"*.
-2. Nhân viên sẽ báo cho Admin hỗ trợ.
-3. Admin truy cập vào menu **"Duyệt Chấm Công"** -> Chọn tab **"Quản Lý Thiết Bị"**.
+2. Nhân viên sẽ báo cho Quản trị viên hỗ trợ mở khóa.
+3. Quản trị viên truy cập vào menu **"Duyệt Chấm Công"** -> Chọn tab **"Quản Lý Thiết Bị"**.
 4. Tìm dòng tên của nhân viên đó.
-5. Nhấn nút **"Hủy liên kết (Unlink / Reset Device)"**.
+5. Nhấn nút **"Hủy liên kết (Mở khóa thiết bị)"**.
 6. Ngay sau khi bấm, liên kết cũ bị xóa bỏ. Nhân viên chỉ cần mở máy mới lên và bấm nút "Đăng ký thiết bị này" là hoàn tất.
 
 ---

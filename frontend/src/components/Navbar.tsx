@@ -23,7 +23,9 @@ import {
   ShieldCheck,
   Palette,
   Monitor,
-  Bell
+  Bell,
+  FileSpreadsheet,
+  ClipboardCheck
 } from 'lucide-react';
 import { notificationsApi } from '../api/client';
 import { AppNotification } from '../types';
@@ -46,6 +48,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [unreadNotiCount, setUnreadNotiCount] = useState<number>(0);
   const [showNotiPopover, setShowNotiPopover] = useState(false);
+  const [notiFilterCurrentBranch, setNotiFilterCurrentBranch] = useState(false);
   const notiMenuRef = useRef<HTMLDivElement>(null);
 
   const fetchNotifications = async () => {
@@ -57,6 +60,11 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
       // ignore
     }
   };
+
+  const displayedNotifications = React.useMemo(() => {
+    if (!notiFilterCurrentBranch || !selectedCompany) return notifications;
+    return notifications.filter(n => !n.companyId || n.companyId === selectedCompany.id);
+  }, [notifications, notiFilterCurrentBranch, selectedCompany]);
 
   useEffect(() => {
     fetchNotifications();
@@ -74,7 +82,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
       await notificationsApi.markAsRead(id);
       setNotifications(prev => prev.map(n => n.notificationId === id ? { ...n, isRead: true } : n));
       setUnreadNotiCount(prev => Math.max(0, prev - 1));
-    } catch {}
+    } catch { }
   };
 
   const handleReadAllNotifications = async () => {
@@ -82,7 +90,104 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
       await notificationsApi.markAllAsRead();
       setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
       setUnreadNotiCount(0);
-    } catch {}
+    } catch { }
+  };
+
+  const resolveNotificationTargetView = (n: AppNotification, role?: string): string => {
+    const linkType = (n.linkType || '').toUpperCase();
+    const title = (n.title || '').toLowerCase();
+    const body = (n.body || '').toLowerCase();
+    const isHrOrAdmin = role === 'Admin' || role === 'HR';
+
+    // 1. Đơn nghỉ phép -> Chuyển đến Quản lý nghỉ phép (admin-leave) với HR/Admin, hoặc Đơn từ cá nhân (ess-requests) với Nhân viên
+    if (linkType === 'LEAVE' || title.includes('nghỉ phép') || body.includes('nghỉ phép') || title.includes('đơn xin nghỉ')) {
+      return isHrOrAdmin ? 'admin-leave' : 'ess-requests';
+    }
+
+    // 2. Giải trình chấm công -> admin-regularization (Quản lý duyệt giải trình) với HR/Admin, hoặc ess-requests với Nhân viên
+    if (linkType === 'REGULARIZATION' || title.includes('giải trình') || body.includes('giải trình')) {
+      return isHrOrAdmin ? 'admin-regularization' : 'ess-requests';
+    }
+
+    // 3. Đơn từ nói chung -> admin-leave với HR/Admin, ess-requests với Nhân viên
+    if (linkType === 'REQUEST' || title.includes('đơn từ') || title.includes('đơn cần duyệt') || title.includes('nộp đơn')) {
+      return isHrOrAdmin ? 'admin-leave' : 'ess-requests';
+    }
+
+    // 4. Bảng chấm công cá nhân / Kỳ công / Khiếu nại -> Trang bảng chấm công cá nhân (ess-history)
+    if (linkType === 'TIMESHEET' || linkType === 'DISPUTE' || title.includes('bảng chấm công') || title.includes('kỳ công') || body.includes('bảng chấm công') || title.includes('khiếu nại')) {
+      return 'ess-history';
+    }
+
+    // 5. Thiết bị & MAC -> Trang thiết bị (ess-devices)
+    if (linkType === 'DEVICE' || title.includes('thiết bị') || title.includes('mac') || body.includes('địa chỉ mac')) {
+      return 'ess-devices';
+    }
+
+    // 6. Tính công / Vận hành kỳ công
+    if (linkType === 'OPERATOR' || title.includes('vận hành') || title.includes('chốt công')) {
+      return isHrOrAdmin ? 'operator' : 'ess-history';
+    }
+
+    // 7. Nhân sự
+    if (linkType === 'EMPLOYEE' || title.includes('nhân sự') || title.includes('nhân viên')) {
+      return isHrOrAdmin ? 'admin-employees' : 'ess-portal';
+    }
+
+    // 8. Lịch làm việc
+    if (linkType === 'CALENDAR' || title.includes('lịch làm việc') || title.includes('ngày lễ')) {
+      return isHrOrAdmin ? 'admin-calendar' : 'ess-portal';
+    }
+
+    // Mặc định
+    return isHrOrAdmin ? 'admin-leave' : 'ess-requests';
+  };
+
+  const getNotificationTargetLabel = (n: AppNotification): string => {
+    const linkType = (n.linkType || '').toUpperCase();
+    const title = (n.title || '').toLowerCase();
+    const body = (n.body || '').toLowerCase();
+    const isHrOrAdmin = user?.role === 'Admin' || user?.role === 'HR';
+
+    if (linkType === 'LEAVE' || title.includes('nghỉ phép') || body.includes('nghỉ phép') || title.includes('đơn xin nghỉ')) {
+      return isHrOrAdmin ? 'Quản lý nghỉ phép' : 'Đơn từ của tôi';
+    }
+    if (linkType === 'REGULARIZATION' || title.includes('giải trình') || body.includes('giải trình')) {
+      return isHrOrAdmin ? 'Duyệt giải trình' : 'Giải trình của tôi';
+    }
+    if (linkType === 'REQUEST' || title.includes('đơn')) {
+      return isHrOrAdmin ? 'Quản lý đơn từ' : 'Đơn từ của tôi';
+    }
+    if (linkType === 'TIMESHEET' || linkType === 'DISPUTE' || title.includes('bảng chấm công') || title.includes('kỳ công')) {
+      return 'Bảng chấm công';
+    }
+    if (linkType === 'DEVICE' || title.includes('thiết bị') || title.includes('mac')) {
+      return 'Thiết bị & MAC';
+    }
+    return isHrOrAdmin ? 'Quản lý nghỉ phép' : 'Đơn từ';
+  };
+
+  const handleNotificationClick = (n: AppNotification) => {
+    handleReadNotification(n.notificationId);
+    setShowNotiPopover(false);
+
+    // Tự động chuyển hội sở làm việc nếu thông báo thuộc cơ sở khác
+    if (n.companyId && selectedCompany && selectedCompany.id !== n.companyId) {
+      const targetComp = companies.find(c => c.id === n.companyId || (n.companyCode && c.code.toLowerCase() === n.companyCode.toLowerCase()));
+      if (targetComp) {
+        setSelectedCompany(targetComp);
+        toast.info(`Đã tự động chuyển sang cơ sở ${targetComp.name} (${targetComp.code}) để xem nội dung.`);
+      }
+    } else if (!n.companyId && n.companyCode && selectedCompany && selectedCompany.code.toLowerCase() !== n.companyCode.toLowerCase()) {
+      const targetComp = companies.find(c => c.code.toLowerCase() === n.companyCode!.toLowerCase());
+      if (targetComp) {
+        setSelectedCompany(targetComp);
+        toast.info(`Đã tự động chuyển sang cơ sở ${targetComp.name} (${targetComp.code}) để xem nội dung.`);
+      }
+    }
+
+    const target = resolveNotificationTargetView(n, user?.role);
+    onNavigate(target);
   };
 
   // Close dropdowns when clicking outside
@@ -138,9 +243,11 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
   const isAdmin = user?.role === 'Admin';
 
   const adminNavItems = [
-    { id: 'admin-dashboard', label: 'Bảng Điều Khiển', icon: LayoutDashboard },
+    { id: 'admin-dashboard', label: 'Trang Tổng Quan', icon: LayoutDashboard },
     { id: 'operator', label: 'Chấm Công', icon: Clock },
+    { id: 'admin-employee-timesheet', label: 'Bảng Công Nhân Viên', icon: FileSpreadsheet },
     { id: 'admin-hr-attendance', label: 'Duyệt Chấm Công', icon: ShieldCheck },
+    { id: 'admin-regularization', label: 'Duyệt Giải Trình', icon: ClipboardCheck },
     { id: 'admin-companies', label: 'Hội sở / Đơn vị', icon: Building2 },
     { id: 'admin-users', label: 'Tài khoản & Phân quyền', icon: Users },
     { id: 'admin-employees', label: 'Danh mục Nhân sự', icon: UserCheck },
@@ -153,9 +260,11 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
   ];
 
   const hrNavItems = [
-    { id: 'admin-dashboard', label: 'Bảng Điều Khiển', icon: LayoutDashboard },
+    { id: 'admin-dashboard', label: 'Trang Tổng Quan', icon: LayoutDashboard },
     { id: 'operator', label: 'Chấm Công', icon: Clock },
+    { id: 'admin-employee-timesheet', label: 'Bảng Công Nhân viên', icon: FileSpreadsheet },
     { id: 'admin-hr-attendance', label: 'Duyệt Chấm Công', icon: ShieldCheck },
+    { id: 'admin-regularization', label: 'Duyệt Giải Trình', icon: ClipboardCheck },
     { id: 'admin-users', label: 'Tài khoản & Phân quyền', icon: Users },
     { id: 'admin-employees', label: 'Danh mục Nhân sự', icon: UserCheck },
     { id: 'admin-calendar', label: 'Lịch Làm Việc & Nghỉ Lễ', icon: Calendar },
@@ -165,8 +274,11 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
     { id: 'ess-portal', label: 'Chấm Công Cá Nhân', icon: Monitor },
   ];
 
+  const isEligibleForSchedule = user?.employeeType === 'PARTTIME' || user?.employeeType === 'REMOTE' || user?.role !== 'Employee';
+
   const employeeNavItems = [
     { id: 'ess-portal', label: 'Điểm Danh & Chấm Công (PC)', icon: Monitor },
+    ...(isEligibleForSchedule ? [{ id: 'ess-schedules', label: 'Đăng Ký Chỗ Làm & Lịch', icon: Calendar }] : []),
     { id: 'ess-history', label: 'Lịch Sử Chấm Công', icon: Clock },
     { id: 'ess-requests', label: 'Đơn Nghỉ Phép & Giải Trình', icon: Wallet },
     { id: 'ess-devices', label: 'Thiết Bị & Địa Chỉ MAC', icon: ShieldCheck },
@@ -308,6 +420,7 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
           {/* NÚT THÔNG BÁO HỆ THỐNG */}
           <div style={{ position: 'relative' }} ref={notiMenuRef}>
             <button
+              id="navbar-notification-btn"
               type="button"
               onClick={() => setShowNotiPopover(prev => !prev)}
               style={{
@@ -352,85 +465,179 @@ export const Navbar: React.FC<NavbarProps> = ({ currentView, onNavigate, onOpenC
             </button>
 
             {showNotiPopover && (
-              <div style={{
-                position: 'absolute',
-                top: 'calc(100% + 8px)',
-                right: 0,
-                width: '360px',
-                maxHeight: '440px',
-                backgroundColor: '#FFFFFF',
-                borderRadius: '14px',
-                boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
-                border: '1px solid var(--neutral-200)',
-                overflow: 'hidden',
-                zIndex: 120,
-                display: 'flex',
-                flexDirection: 'column',
-                animation: 'fadeIn 0.15s ease-out'
-              }}>
+              <div
+                id="navbar-notification-popover"
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 8px)',
+                  right: 0,
+                  width: '360px',
+                  maxHeight: '440px',
+                  backgroundColor: '#FFFFFF',
+                  borderRadius: '14px',
+                  boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1)',
+                  border: '1px solid var(--neutral-200)',
+                  overflow: 'hidden',
+                  zIndex: 120,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  animation: 'fadeIn 0.15s ease-out'
+                }}>
                 <div style={{
                   padding: '12px 16px',
                   backgroundColor: 'var(--neutral-50)',
                   borderBottom: '1px solid var(--neutral-200)',
                   display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between'
+                  flexDirection: 'column',
+                  gap: '8px'
                 }}>
-                  <div style={{ fontWeight: 800, fontSize: '13px', color: 'var(--neutral-900)' }}>
-                    Thông báo hệ thống ({notifications.length})
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between'
+                  }}>
+                    <div style={{ fontWeight: 800, fontSize: '13px', color: 'var(--neutral-900)' }}>
+                      Thông báo hệ thống ({notifications.length})
+                    </div>
+                    {unreadNotiCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleReadAllNotifications}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: 'var(--primary)',
+                          fontSize: '12px',
+                          fontWeight: 700,
+                          cursor: 'pointer'
+                        }}
+                      >
+                        Đọc tất cả
+                      </button>
+                    )}
                   </div>
-                  {unreadNotiCount > 0 && (
-                    <button
-                      type="button"
-                      onClick={handleReadAllNotifications}
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        color: 'var(--primary)',
-                        fontSize: '12px',
-                        fontWeight: 700,
-                        cursor: 'pointer'
-                      }}
-                    >
-                      Đọc tất cả
-                    </button>
+
+                  {selectedCompany && (
+                    <div style={{ display: 'flex', gap: '6px' }}>
+                      <button
+                        type="button"
+                        onClick={() => setNotiFilterCurrentBranch(false)}
+                        style={{
+                          padding: '3px 8px',
+                          borderRadius: '6px',
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          border: '1px solid',
+                          borderColor: !notiFilterCurrentBranch ? 'var(--primary)' : 'var(--neutral-200)',
+                          backgroundColor: !notiFilterCurrentBranch ? 'var(--primary-bg)' : '#FFFFFF',
+                          color: !notiFilterCurrentBranch ? 'var(--primary)' : 'var(--neutral-600)'
+                        }}
+                      >
+                        Tất cả ({notifications.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setNotiFilterCurrentBranch(true)}
+                        style={{
+                          padding: '3px 8px',
+                          borderRadius: '6px',
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          border: '1px solid',
+                          borderColor: notiFilterCurrentBranch ? 'var(--primary)' : 'var(--neutral-200)',
+                          backgroundColor: notiFilterCurrentBranch ? 'var(--primary-bg)' : '#FFFFFF',
+                          color: notiFilterCurrentBranch ? 'var(--primary)' : 'var(--neutral-600)'
+                        }}
+                      >
+                        Tại {selectedCompany.code} ({notifications.filter(n => !n.companyId || n.companyId === selectedCompany.id).length})
+                      </button>
+                    </div>
                   )}
                 </div>
 
                 <div style={{ overflowY: 'auto', maxHeight: '360px', padding: '8px' }}>
-                  {notifications.length === 0 ? (
+                  {displayedNotifications.length === 0 ? (
                     <div style={{ textAlign: 'center', padding: '28px 16px', color: 'var(--neutral-400)', fontSize: '13px' }}>
-                      Chưa có thông báo nào.
+                      {notiFilterCurrentBranch ? `Không có thông báo nào của hội sở ${selectedCompany?.code}.` : 'Chưa có thông báo nào.'}
                     </div>
                   ) : (
-                    notifications.map((n) => (
-                      <div
-                        key={n.notificationId}
-                        onClick={() => handleReadNotification(n.notificationId)}
-                        style={{
-                          padding: '10px 12px',
-                          borderRadius: '8px',
-                          marginBottom: '6px',
-                          backgroundColor: n.isRead ? '#FFFFFF' : '#EFF6FF',
-                          border: `1px solid ${n.isRead ? '#F1F5F9' : '#BFDBFE'}`,
-                          cursor: 'pointer',
-                          transition: 'background-color 0.15s ease'
-                        }}
-                      >
-                        <div style={{ fontWeight: 700, fontSize: '13px', color: '#0F172A', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                          <span>{n.title}</span>
-                          {!n.isRead && (
-                            <span style={{ width: 7, height: 7, borderRadius: '50%', backgroundColor: '#2563EB', display: 'inline-block' }} />
+                    displayedNotifications.map((n) => {
+                      const targetLabel = getNotificationTargetLabel(n);
+                      const isCurrentComp = !n.companyId || (selectedCompany && n.companyId === selectedCompany.id);
+                      const branchText = n.companyName ? `${n.companyCode ? n.companyCode + ' - ' : ''}${n.companyName}` : (n.branchCode || n.companyCode);
+
+                      return (
+                        <div
+                          key={n.notificationId}
+                          onClick={() => handleNotificationClick(n)}
+                          style={{
+                            padding: '12px 14px',
+                            borderRadius: '10px',
+                            marginBottom: '8px',
+                            backgroundColor: n.isRead ? '#FFFFFF' : '#EFF6FF',
+                            border: `1px solid ${n.isRead ? '#E2E8F0' : '#BFDBFE'}`,
+                            cursor: 'pointer',
+                            transition: 'all 0.15s ease'
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor = n.isRead ? '#F8FAFC' : '#DBEAFE';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = n.isRead ? '#FFFFFF' : '#EFF6FF';
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px' }}>
+                            <div style={{ fontWeight: 700, fontSize: '13px', color: '#0F172A', flex: 1 }}>
+                              {n.title}
+                            </div>
+                            {!n.isRead && (
+                              <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#2563EB', flexShrink: 0, marginTop: '4px' }} />
+                            )}
+                          </div>
+
+                          {branchText && (
+                            <div style={{ marginTop: '4px' }}>
+                              <span style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                fontSize: '11px',
+                                fontWeight: 700,
+                                padding: '1px 6px',
+                                borderRadius: '4px',
+                                color: isCurrentComp ? '#15803D' : '#B45309',
+                                backgroundColor: isCurrentComp ? '#DCFCE7' : '#FEF3C7'
+                              }}>
+                                <Building2 size={11} />
+                                {branchText}
+                                {!isCurrentComp && ' (Bấm để chuyển cơ sở)'}
+                              </span>
+                            </div>
                           )}
+
+                          <div style={{ fontSize: '12px', color: '#475569', marginTop: '4px', lineHeight: 1.4 }}>
+                            {n.body}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '6px', fontSize: '11px' }}>
+                            <span style={{ color: '#94A3B8' }}>{n.timeLocal || ''}</span>
+                            <span style={{
+                              color: '#0056B3',
+                              fontWeight: 700,
+                              backgroundColor: '#E0F2FE',
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px'
+                            }}>
+                              {targetLabel} →
+                            </span>
+                          </div>
                         </div>
-                        <div style={{ fontSize: '12px', color: '#475569', marginTop: '4px', lineHeight: 1.4 }}>
-                          {n.body}
-                        </div>
-                        <div style={{ fontSize: '11px', color: '#94A3B8', marginTop: '4px' }}>
-                          {n.timeLocal || ''}
-                        </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               </div>

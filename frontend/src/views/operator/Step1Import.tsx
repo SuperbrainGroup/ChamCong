@@ -148,123 +148,94 @@ export const Step1Import: React.FC<Step1ImportProps> = ({ period, onImportSucces
             </div>
           </div>
           <span className="badge badge-neutral" style={{ whiteSpace: 'nowrap', fontWeight: 700 }}>
-            {isClosed ? 'Kỳ đã chốt' : 'Đang xử lý'}
+            {isClosed ? (
+              <></>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                <div>
+                  <button
+                    type="button"
+                    onClick={handleSyncSelfAttendance}
+                    disabled={syncingSelf || committing || inspecting}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      padding: '10px 22px',
+                      borderRadius: '8px',
+                      backgroundColor: syncingSelf ? '#93C5FD' : '#0056B3',
+                      color: '#FFFFFF',
+                      border: 'none',
+                      fontWeight: 700,
+                      fontSize: '13px',
+                      cursor: syncingSelf ? 'wait' : 'pointer',
+                      boxShadow: '0 2px 6px rgba(0, 86, 179, 0.25)',
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    {syncingSelf ? (
+                      <>
+                        <RefreshCw size={16} className="animate-spin" />
+                        <span style={{ whiteSpace: 'nowrap' }}>Đang tổng hợp & tính công...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Zap size={16} />
+                        <span style={{ whiteSpace: 'nowrap' }}>Tổng hợp & Tính công ngay</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {syncResult && (
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    flexWrap: 'wrap',
+                    gap: '12px',
+                    padding: '14px 18px',
+                    backgroundColor: '#ECFDF5',
+                    border: '1px solid #A7F3D0',
+                    borderRadius: '8px',
+                    color: '#065F46',
+                    fontSize: '13px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <CheckCircle2 size={18} color="#059669" />
+                      <div>
+                        <strong>Đã tổng hợp & tính công thành công! </strong>
+                        {syncResult.message}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <button
+                        type="button"
+                        onClick={() => onGoToStep ? onGoToStep(3) : onNextStep()}
+                        className="btn btn-sm btn-primary"
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
+                        title="Mở trực tiếp lưới Bảng tính công đã tính toán"
+                      >
+                        <span>Mở ngay Bảng Chấm Công (Bước 3)</span>
+                        <ArrowRight size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={onNextStep}
+                        className="btn btn-sm btn-secondary"
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
+                      >
+                        <span>Rà soát cảnh báo (Bước 2)</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </span>
         </div>
 
-        <div className="card-body" style={{ padding: '20px' }}>
-          {isClosed ? (
-            <div style={{
-              padding: '16px',
-              backgroundColor: 'var(--neutral-100)',
-              borderRadius: 'var(--radius)',
-              color: 'var(--neutral-600)',
-              textAlign: 'center'
-            }}>
-              Kỳ công đã chốt. Để tính công lại, Quản trị viên cần thực hiện mở chốt kỳ công.
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-              <div style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                flexWrap: 'wrap',
-                gap: '16px',
-                padding: '16px 20px',
-                backgroundColor: '#F8FAFC',
-                borderRadius: '12px',
-                border: '1px solid #E2E8F0'
-              }}>
-                <div style={{ maxWidth: '640px' }}>
-                  <div style={{ fontSize: '14px', fontWeight: 700, color: '#1E293B', marginBottom: '4px' }}>
-                    Tổng hợp dữ liệu chấm công từ thiết bị của nhân viên
-                  </div>
-                  <div style={{ fontSize: '13px', color: '#64748B', lineHeight: '1.5' }}>
-                    Hệ thống tự động thu thập toàn bộ lượt điểm danh (Vào/Ra) hợp lệ từ máy tính PC và điện thoại Mobile của nhân viên trong kỳ, cùng các đơn giải trình đã được HCNS phê duyệt.
-                  </div>
-                </div>
 
-                <button
-                  type="button"
-                  onClick={handleSyncSelfAttendance}
-                  disabled={syncingSelf || committing || inspecting}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    padding: '10px 22px',
-                    borderRadius: '8px',
-                    backgroundColor: syncingSelf ? '#93C5FD' : '#0056B3',
-                    color: '#FFFFFF',
-                    border: 'none',
-                    fontWeight: 700,
-                    fontSize: '13px',
-                    cursor: syncingSelf ? 'wait' : 'pointer',
-                    boxShadow: '0 2px 6px rgba(0, 86, 179, 0.25)',
-                    whiteSpace: 'nowrap'
-                  }}
-                >
-                  {syncingSelf ? (
-                    <>
-                      <RefreshCw size={16} className="animate-spin" />
-                      <span style={{ whiteSpace: 'nowrap' }}>Đang tổng hợp & tính công...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Zap size={16} />
-                      <span style={{ whiteSpace: 'nowrap' }}>⚡ 1-Chạm: Tổng hợp & Tính công ngay</span>
-                    </>
-                  )}
-                </button>
-              </div>
-
-              {syncResult && (
-                <div style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  flexWrap: 'wrap',
-                  gap: '12px',
-                  padding: '14px 18px',
-                  backgroundColor: '#ECFDF5',
-                  border: '1px solid #A7F3D0',
-                  borderRadius: '8px',
-                  color: '#065F46',
-                  fontSize: '13px'
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                    <CheckCircle2 size={18} color="#059669" />
-                    <div>
-                      <strong>Đã tổng hợp & tính công thành công! </strong>
-                      {syncResult.message}
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <button
-                      type="button"
-                      onClick={() => onGoToStep ? onGoToStep(3) : onNextStep()}
-                      className="btn btn-sm btn-primary"
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
-                      title="Mở trực tiếp lưới Bảng tính công đã tính toán"
-                    >
-                      <span>👉 Mở ngay Bảng Chấm Công (Bước 3)</span>
-                      <ArrowRight size={14} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={onNextStep}
-                      className="btn btn-sm btn-secondary"
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}
-                    >
-                      <span>Rà soát cảnh báo (Bước 2)</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
       </div>
 
       {/* KHỐI 2: NẠP BỔ SUNG FILE MÁY CHẤM CÔNG (TÙY CHỌN GỘP DỮ LIỆU) */}

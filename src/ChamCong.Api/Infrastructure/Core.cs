@@ -138,6 +138,86 @@ public class AccessService
         return e;
     }
 
+    /// <summary>Đảm bảo tài khoản người dùng (đặc biệt là HR/Admin) có mã nhân viên và hồ sơ Employee để chấm công không bị lỗi hệ thống.</summary>
+    public async Task<Employee> EnsureEmployeeProfileAsync(User user, int? companyId = null, CancellationToken ct = default)
+    {
+        int effectiveCompanyId = companyId 
+            ?? user.Companies.FirstOrDefault()?.CompanyId 
+            ?? (await _db.UserCompanies.Where(uc => uc.UserId == user.Id).Select(uc => uc.CompanyId).FirstOrDefaultAsync(ct));
+
+        if (effectiveCompanyId == 0)
+        {
+            var defaultComp = await _db.Companies.FirstOrDefaultAsync(ct);
+            effectiveCompanyId = defaultComp?.Id ?? 1;
+        }
+
+        bool userUpdated = false;
+        if (string.IsNullOrWhiteSpace(user.EmployeeCode))
+        {
+            user.EmployeeCode = user.Username.Equals("hr", StringComparison.OrdinalIgnoreCase) 
+                ? "HR01" 
+                : (string.Equals(user.Role, Roles.HR, StringComparison.OrdinalIgnoreCase) ? $"HR{user.Id:D3}" : $"EMP{user.Id:D3}");
+            userUpdated = true;
+        }
+
+        var dbUser = await _db.Users.FirstOrDefaultAsync(u => u.Id == user.Id, ct);
+        if (dbUser != null && string.IsNullOrWhiteSpace(dbUser.EmployeeCode))
+        {
+            dbUser.EmployeeCode = user.EmployeeCode;
+            userUpdated = true;
+        }
+
+        if (userUpdated)
+        {
+            await _db.SaveChangesAsync(ct);
+        }
+
+        var emp = await _db.Employees.FirstOrDefaultAsync(e => 
+            e.EmployeeCode == user.EmployeeCode && 
+            (e.CompanyId == effectiveCompanyId || effectiveCompanyId == 0), ct);
+
+        if (emp == null)
+        {
+            var defaultGroup = await _db.EmployeeGroups.FirstOrDefaultAsync(g => g.CompanyId == effectiveCompanyId && g.IsDefault, ct)
+                               ?? await _db.EmployeeGroups.FirstOrDefaultAsync(g => g.CompanyId == effectiveCompanyId, ct);
+
+            emp = new Employee
+            {
+                CompanyId = effectiveCompanyId,
+                EmployeeCode = user.EmployeeCode,
+                FullName = !string.IsNullOrWhiteSpace(user.FullName) ? user.FullName : user.Username,
+                GroupId = defaultGroup?.Id ?? 0,
+                StartDate = new DateTime(2025, 1, 1),
+                AttendanceSource = "APP",
+                EmployeeType = "STANDARD"
+            };
+            _db.Employees.Add(emp);
+            await _db.SaveChangesAsync(ct);
+        }
+
+        // Đảm bảo có phân công hội sở
+        var comp = await _db.Companies.AsNoTracking().FirstOrDefaultAsync(c => c.Id == effectiveCompanyId, ct);
+        if (comp != null)
+        {
+            var hasBranchAssign = await _db.EmployeeBranchAssignments.AnyAsync(a => 
+                a.EmployeeCode == user.EmployeeCode && a.BranchCode == comp.Code, ct);
+            if (!hasBranchAssign)
+            {
+                _db.EmployeeBranchAssignments.Add(new EmployeeBranchAssignment
+                {
+                    CompanyId = effectiveCompanyId,
+                    EmployeeCode = user.EmployeeCode,
+                    BranchCode = comp.Code,
+                    IsPrimary = true,
+                    FromDate = new DateTime(2025, 1, 1)
+                });
+                await _db.SaveChangesAsync(ct);
+            }
+        }
+
+        return emp;
+    }
+
     public void EnsureAdmin()
     {
         if (!IsAdmin) throw AppException.Forbidden("Yêu cầu quyền Quản trị viên (Admin).");

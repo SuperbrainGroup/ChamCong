@@ -17,17 +17,20 @@ public class AttendanceController : ControllerBase
     private readonly IAttendancePunchService _punchService;
     private readonly IGeofenceService _geofenceService;
     private readonly AppDbContext _db;
+    private readonly AccessService _access;
     private readonly AuditService _audit;
 
     public AttendanceController(
         IAttendancePunchService punchService,
         IGeofenceService geofenceService,
         AppDbContext db,
+        AccessService access,
         AuditService audit)
     {
         _punchService = punchService;
         _geofenceService = geofenceService;
         _db = db;
+        _access = access;
         _audit = audit;
     }
 
@@ -37,20 +40,21 @@ public class AttendanceController : ControllerBase
     {
         var uid = User.UserId();
         var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
-        if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode))
-        {
-            return BadRequest(new { code = "NO_EMPLOYEE", message = "Tài khoản chưa liên kết nhân viên." });
-        }
+        if (user == null) return Unauthorized();
 
         var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
-
-        // 1. Phân giải ca làm việc theo Hội sở và Khối nhân viên
         var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
         if (primaryCompanyId.HasValue)
         {
             empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
         }
         var emp = await empQuery.FirstOrDefaultAsync(ct);
+
+        if (string.IsNullOrWhiteSpace(user.EmployeeCode) || emp == null)
+        {
+            emp = await _access.EnsureEmployeeProfileAsync(user, primaryCompanyId, ct);
+        }
+
         int? companyId = emp?.CompanyId ?? primaryCompanyId;
         int? groupId = emp?.GroupId;
 
@@ -144,17 +148,19 @@ public class AttendanceController : ControllerBase
                 shiftStatusLabel = "Đang trong ca làm việc";
                 statusDescription = $"Vừa Check-in lúc {AttendancePunchService.ToVietnamTime(firstPunch!.CheckTimeUtc):HH:mm}. Khóa Check-out tối thiểu 30 phút để chống bấm nhầm (còn {remainingMinutesToCheckout} phút).";
             }
-            else if (isCheckoutWindow)
-            {
-                currentMode = "CHECK_OUT";
-                shiftStatusLabel = "Chuẩn bị tan ca & Sẵn sàng Check-out";
-                statusDescription = $"Đã đến khung giờ chuẩn bị ra về ({checkoutStartFormatted} – {shiftEndFormatted}). Hãy bấm Check-out khi kết thúc công việc.";
-            }
             else
             {
-                currentMode = "WORKING";
-                shiftStatusLabel = "Đang trong giờ làm việc";
-                statusDescription = $"Đang làm việc (Check-in lúc {AttendancePunchService.ToVietnamTime(firstPunch!.CheckTimeUtc):HH:mm}). Giờ tan ca dự kiến: {shiftEndFormatted}.";
+                currentMode = "CHECK_OUT";
+                if (isCheckoutWindow || isPastShiftEnd)
+                {
+                    shiftStatusLabel = "Chuẩn bị tan ca & Sẵn sàng Check-out";
+                    statusDescription = $"Đã đến khung giờ chuẩn bị ra về ({checkoutStartFormatted} – {shiftEndFormatted}). Hãy bấm Check-out khi kết thúc công việc.";
+                }
+                else
+                {
+                    shiftStatusLabel = "Đang trong ca làm việc";
+                    statusDescription = $"Đang làm việc (Check-in lúc {AttendancePunchService.ToVietnamTime(firstPunch!.CheckTimeUtc):HH:mm}). Bạn có thể bấm Check-out khi kết thúc công việc (Giờ tan ca: {shiftEndFormatted}).";
+                }
             }
         }
         else
@@ -201,7 +207,9 @@ public class AttendanceController : ControllerBase
             remainingMinutesToCheckout,
             firstPunchTime = firstPunch != null ? AttendancePunchService.ToVietnamTime(firstPunch.CheckTimeUtc).ToString("HH:mm:ss") : null,
             lastPunchTime = lastPunch != null ? AttendancePunchService.ToVietnamTime(lastPunch.CheckTimeUtc).ToString("HH:mm:ss") : null,
-            todayPunchCount = punches.Count,
+            todayPunchCount = usablePunches.Count,
+            totalPunchLogs = punches.Count,
+            validPunchCount = usablePunches.Count,
             clientPublicIp = clientIp,
             pcMacAddress = pcDevice?.FingerprintHash,
             pcApprovalStatus = pcDevice?.ApprovalStatus,
@@ -250,10 +258,7 @@ public class AttendanceController : ControllerBase
     {
         var uid = User.UserId();
         var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
-        if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode))
-        {
-            return BadRequest(new { code = "NO_EMPLOYEE", message = "Tài khoản chưa liên kết nhân viên." });
-        }
+        if (user == null) return Unauthorized();
 
         var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
         var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
@@ -262,7 +267,26 @@ public class AttendanceController : ControllerBase
             empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
         }
         var emp = await empQuery.FirstOrDefaultAsync(ct);
+
+        if (string.IsNullOrWhiteSpace(user.EmployeeCode) || emp == null)
+        {
+            emp = await _access.EnsureEmployeeProfileAsync(user, primaryCompanyId, ct);
+        }
+
         int? companyId = emp?.CompanyId ?? primaryCompanyId;
+
+        if (emp != null)
+        {
+            var checkDate = AttendancePunchService.ToVietnamTime(DateTime.UtcNow).Date;
+            if (checkDate < emp.StartDate.Date)
+            {
+                return BadRequest(new { code = "NOT_STARTED", message = $"Bạn chưa đến ngày bắt đầu làm việc chính thức ({emp.StartDate:dd/MM/yyyy}). Chưa thể chấm công." });
+            }
+            if (emp.EndDate.HasValue && checkDate > emp.EndDate.Value.Date)
+            {
+                return BadRequest(new { code = "TERMINATED", message = $"Tài khoản đã ghi nhận nghỉ việc từ ngày {emp.EndDate.Value:dd/MM/yyyy}. Không thể chấm công." });
+            }
+        }
 
         var rawDeviceSecret = Request.Headers["X-Device-Secret"].FirstOrDefault();
         var clientMac = Request.Headers["X-Device-Mac"].FirstOrDefault();
@@ -418,6 +442,12 @@ public class AttendanceController : ControllerBase
         var issues = new List<object>();
         foreach (var s in summaries)
         {
+            // Trước ngày nhân viên làm việc hoặc sau ngày nghỉ việc -> Không cần giải trình
+            if (s.WorkDate.Date < emp.StartDate.Date || (emp.EndDate.HasValue && s.WorkDate.Date > emp.EndDate.Value.Date))
+            {
+                continue;
+            }
+
             bool isMissing = s.InTime == null || s.OutTime == null;
             if (isMissing || s.HasPendingReview)
             {
@@ -590,7 +620,7 @@ public class HrAttendanceController : ControllerBase
         var devIds = logs.Select(l => l.DeviceBindingId).Distinct().ToList();
         var devMap = await _db.EmployeeDevices.AsNoTracking()
             .Where(d => devIds.Contains(d.DeviceBindingId))
-            .ToDictionaryAsync(d => d.DeviceBindingId, d => $"{d.DeviceName} ({d.OperatingSystem ?? "OS"} / {d.BrowserInfo ?? "Browser"})", ct);
+            .ToDictionaryAsync(d => d.DeviceBindingId, ct);
 
         var result = logs.Select(l =>
         {
@@ -606,7 +636,11 @@ public class HrAttendanceController : ControllerBase
             }
             BranchLocation? loc = null;
             if (l.DetectedBranchCode != null) locMap.TryGetValue(l.DetectedBranchCode, out loc);
-            devMap.TryGetValue(l.DeviceBindingId, out var devInfo);
+            devMap.TryGetValue(l.DeviceBindingId, out var dev);
+
+            string devInfoFormatted = dev != null
+                ? $"{dev.DeviceName} ({(dev.DeviceType == "PC" ? (!string.IsNullOrEmpty(dev.FingerprintHash) ? $"MAC: {dev.FingerprintHash}" : "Chưa gán MAC") : $"{dev.OperatingSystem} / {dev.BrowserInfo}")})"
+                : (l.Channel == "PC_WEB" ? "Máy tính (PC)" : "Điện thoại (Mobile)");
 
             string sumKey = l.CompanyId.HasValue ? $"{l.CompanyId}_{l.EmployeeCode}_{l.WorkDate:yyyy-MM-dd}" : $"1_{l.EmployeeCode}_{l.WorkDate:yyyy-MM-dd}";
             if (!summaryMap.TryGetValue(sumKey, out var daySummary))
@@ -642,7 +676,12 @@ public class HrAttendanceController : ControllerBase
                 branchLatitude = loc?.Latitude,
                 branchLongitude = loc?.Longitude,
                 branchRadiusMeters = loc?.RadiusMeters,
-                deviceInfo = devInfo,
+                deviceInfo = devInfoFormatted,
+                deviceName = dev?.DeviceName,
+                deviceType = dev?.DeviceType ?? (l.Channel == "PC_WEB" ? "PC" : "MOBILE"),
+                deviceMac = dev?.FingerprintHash,
+                operatingSystem = dev?.OperatingSystem,
+                browserInfo = dev?.BrowserInfo,
                 l.ReviewNote
             };
         });

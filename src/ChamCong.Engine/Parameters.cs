@@ -31,6 +31,7 @@ public static class ParamCatalog
     public const string FlexInWindow = "FLEX_IN_WINDOW";
     public const string FlexOutWindow = "FLEX_OUT_WINDOW";
     public const string GracePeriodMinutes = "GRACE_PERIOD_MINUTES";
+    public const string GraceMaxTimesMonth = "GRACE_MAX_TIMES_MONTH";
     public const string MinHoursFullDay = "MIN_HOURS_FULL_DAY";
     public const string MinHoursHalfDay = "MIN_HOURS_HALF_DAY";
     public const string SaturdayWorkPolicy = "SATURDAY_WORK_POLICY";
@@ -82,6 +83,8 @@ public static class ParamCatalog
             Default = "17:00-17:10", Description = "Giờ ra bù không vượt quá cuối khung này." },
         new() { Code = GracePeriodMinutes, Group = "Flexitime", Name = "Thời gian du di (phút)", Type = ParamType.Int,
             Default = "10", Min = 0, Max = 120, Description = "Vào trễ không quá số phút này thì không bị coi là đi trễ. 0 = không áp dụng." },
+        new() { Code = GraceMaxTimesMonth, Group = "Flexitime", Name = "Số lần được du di trong tháng", Type = ParamType.Int,
+            Default = "2", Min = 0, Max = 31, Description = "Số lần tối đa trong tháng được miễn tính đi trễ khi check-in trong khoảng thời gian du di. Đặt 0 = không cho du di lần nào." },
         new() { Code = MinHoursFullDay, Group = "Ngưỡng công", Name = "Ngưỡng tính đủ 1.0 công (giờ)", Type = ParamType.Decimal,
             Default = "7.5", Min = 0, Max = 24 },
         new() { Code = MinHoursHalfDay, Group = "Ngưỡng công", Name = "Ngưỡng tính nửa công 0.5 (giờ)", Type = ParamType.Decimal,
@@ -127,7 +130,7 @@ public static class ParamCatalog
         new() { Code = RequestEvidencePolicy, Group = "Đơn từ & Giải trình", Name = "Chính sách ảnh minh chứng đơn từ", Type = ParamType.Enum, Default = "REQUIRED",
             Options = new[] { new ParamOption("REQUIRED", "Bắt buộc có ít nhất 1 ảnh minh chứng"), new ParamOption("OPTIONAL", "Không bắt buộc ảnh") } },
         new() { Code = RequestBackdateMaxDays, Group = "Đơn từ & Giải trình", Name = "Hạn nộp lùi về quá khứ tối đa (ngày)", Type = ParamType.Int,
-            Default = "10", Min = 1, Max = 60, Description = "Chỉ cho phép nộp đơn/giải trình lùi tối đa số ngày này." },
+            Default = "10", Min = 0, Max = 3650, Description = "Số ngày tối đa cho phép nộp đơn xin nghỉ / giải trình lùi về quá khứ (0 = Không giới hạn giải trình lùi)." },
         new() { Code = LeaveAdvanceMaxDays, Group = "Đơn từ & Giải trình", Name = "Hạn nộp trước tương lai tối đa (ngày)", Type = ParamType.Int,
             Default = "90", Min = 1, Max = 365, Description = "Số ngày nộp đơn xin nghỉ trước tối đa trong tương lai." },
         new() { Code = PublishDefaultDay, Group = "Công bố bảng công", Name = "Mốc ngày gợi ý công bố bảng công", Type = ParamType.Int,
@@ -219,6 +222,7 @@ public sealed class EngineParams
     public int FlexOutStart { get; set; } = 17 * 60;
     public int FlexOutEnd { get; set; } = 17 * 60 + 45;
     public int GraceMinutes { get; set; } = 10;
+    public int GraceMaxTimesMonth { get; set; } = 2;
     public decimal MinHoursFull { get; set; } = 7.5m;
     public decimal MinHoursHalf { get; set; } = 3.5m;
     public bool OtEnabled { get; set; } = true;
@@ -252,6 +256,7 @@ public sealed class EngineParams
         TimeUtil.TryParseRange(Get(ParamCatalog.FlexOutWindow), out var fo1, out var fo2);
         p.FlexOutStart = fo1; p.FlexOutEnd = fo2;
         p.GraceMinutes = Int(ParamCatalog.GracePeriodMinutes);
+        p.GraceMaxTimesMonth = Int(ParamCatalog.GraceMaxTimesMonth);
         p.MinHoursFull = Dec(ParamCatalog.MinHoursFullDay);
         p.MinHoursHalf = Dec(ParamCatalog.MinHoursHalfDay);
         p.OtEnabled = Bool(ParamCatalog.OtEnabled);

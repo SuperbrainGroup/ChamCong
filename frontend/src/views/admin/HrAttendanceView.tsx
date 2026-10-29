@@ -68,6 +68,7 @@ export const HrAttendanceView: React.FC = () => {
 
   // Tab 1: Hàng đợi duyệt lượt ngoại lệ
   const [punches, setPunches] = useState<any[]>([]);
+  const [totalPendingCount, setTotalPendingCount] = useState<number>(0);
   const [selectedPunchIds, setSelectedPunchIds] = useState<number[]>([]);
   const [reviewNote, setReviewNote] = useState('');
   const [flagFilter, setFlagFilter] = useState<'ALL' | 'REVIEW' | 'OUT_OF_OFFICE'>('ALL');
@@ -189,14 +190,55 @@ export const HrAttendanceView: React.FC = () => {
       setPeriods(computed);
       setEmployees(empRes.data || []);
 
+      const curPeriod = computed.find(p => p.isCurrent) || computed[0] || null;
       setSelectedPeriod(prev => {
         if (prev && computed.some(p => p.fromDate === prev.fromDate && p.toDate === prev.toDate)) {
           return prev;
         }
-        return computed.find(p => p.isCurrent) || computed[0] || null;
+        return curPeriod;
       });
+
+      if (curPeriod) {
+        attendanceApi.getHrPunches({
+          branch: branchCode,
+          fromDate: curPeriod.fromDate,
+          toDate: curPeriod.toDate,
+          onlyValid: true,
+          limit: 1500
+        }).then(data => setValidPunches(data || [])).catch(() => {});
+      }
     } catch (e) {
       console.error(e);
+    }
+  };
+
+  // Nạp toàn bộ dữ liệu thống kê số lượng cho các tab ngay từ đầu
+  const loadAllCounts = async () => {
+    try {
+      const [sumRes, devRes, locRes, netRes, dispRes, punchRes] = await Promise.allSettled([
+        hrDashboardApi.getSummary(branchCode),
+        devicesApi.getHrDevices(undefined, branchCode),
+        branchSettingsApi.getLocations(branchCode),
+        branchSettingsApi.getNetworks(branchCode),
+        timesheetApi.getDisputes(),
+        attendanceApi.getHrPunches({ branch: branchCode, onlyInvalid: true })
+      ]);
+
+      if (sumRes.status === 'fulfilled') setSummary(sumRes.value);
+      if (devRes.status === 'fulfilled') setDevices(devRes.value || []);
+      if (locRes.status === 'fulfilled') setLocations(locRes.value || []);
+      if (netRes.status === 'fulfilled') setNetworks(netRes.value || []);
+      if (dispRes.status === 'fulfilled') setDisputes(dispRes.value || []);
+      if (punchRes.status === 'fulfilled') {
+        const raw = punchRes.value || [];
+        const invalidList = raw.filter((p: any) => p.verificationStatus !== 'VALID' || p.reviewState === 'PENDING');
+        setTotalPendingCount(invalidList.length);
+        if (activeTab === 'flags' && flagFilter === 'ALL') {
+          setPunches(invalidList);
+        }
+      }
+    } catch (e) {
+      console.error('Lỗi khi nạp số liệu tổng quan tabs:', e);
     }
   };
 
@@ -248,8 +290,7 @@ export const HrAttendanceView: React.FC = () => {
         setDisputes(disps);
       }
 
-      const sum = await hrDashboardApi.getSummary(branchCode);
-      setSummary(sum);
+      await loadAllCounts();
     } catch (err: any) {
       console.error(err);
     } finally {
@@ -259,7 +300,8 @@ export const HrAttendanceView: React.FC = () => {
 
   useEffect(() => {
     loadPeriodAndEmpData();
-  }, [selectedCompany?.id]);
+    loadAllCounts();
+  }, [selectedCompany?.id, branchCode]);
 
   useEffect(() => {
     if (activeTab === 'valid') {
@@ -409,6 +451,18 @@ export const HrAttendanceView: React.FC = () => {
       loadData();
     } catch (err: any) {
       addToast(err.response?.data?.message || 'Lỗi cập nhật MAC.', 'error');
+    }
+  };
+
+  // Xóa địa chỉ MAC hoàn toàn khỏi thiết bị
+  const handleDeleteDeviceMac = async (id: number, currentMac?: string) => {
+    if (!confirm(`Bạn có chắc chắn muốn XÓA HOÀN TOÀN địa chỉ MAC (${currentMac || 'hiện tại'}) khỏi thiết bị này?\n\nSau khi xóa, nhân viên sẽ cần đăng ký lại địa chỉ MAC mới của máy tính để chấm công.`)) return;
+    try {
+      await devicesApi.deleteDeviceMac(id);
+      addToast('Đã xóa hoàn toàn địa chỉ MAC khỏi thiết bị.', 'success');
+      loadData();
+    } catch (err: any) {
+      addToast(err.response?.data?.message || 'Lỗi khi xóa địa chỉ MAC.', 'error');
     }
   };
 
@@ -611,8 +665,26 @@ export const HrAttendanceView: React.FC = () => {
     const mobileCount = filteredValidPunches.filter(p => p.channel === 'MOBILE_PWA').length;
     const webCount = filteredValidPunches.filter(p => p.channel === 'PC_WEB').length;
     const approvedCount = filteredValidPunches.filter(p => p.reviewState === 'ACCEPTED').length;
-    return { totalPunches, uniqueEmployees, mobileCount, webCount, approvedCount };
-  }, [filteredValidPunches]);
+
+    // Thống kê ngày hôm nay
+    const now = new Date();
+    const todayStr = summary?.todayDate || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    
+    const todayPunchesList = filteredValidPunches.filter(p => {
+      const d = (p.workDate || '').split('T')[0];
+      return d === todayStr;
+    });
+
+    const isPeriodCurrent = selectedPeriod ? (todayStr >= selectedPeriod.fromDate && todayStr <= selectedPeriod.toDate) : true;
+    const todayPunches = todayPunchesList.length > 0 
+      ? todayPunchesList.length 
+      : (isPeriodCurrent ? (summary?.validCount ?? 0) : 0);
+    const todayEmployees = todayPunchesList.length > 0
+      ? new Set(todayPunchesList.map(p => p.employeeCode)).size
+      : (isPeriodCurrent ? (summary?.checkedInCount ?? 0) : 0);
+
+    return { totalPunches, uniqueEmployees, mobileCount, webCount, approvedCount, todayPunches, todayEmployees };
+  }, [filteredValidPunches, summary, selectedPeriod]);
 
   return (
     <div style={{ width: '100%' }}>
@@ -631,18 +703,54 @@ export const HrAttendanceView: React.FC = () => {
       {/* 4 Thẻ Summary Cards */}
       {summary && (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14, marginBottom: 20 }}>
-          <div style={{ backgroundColor: '#FFF', padding: 16, borderRadius: 12, border: '1px solid #E2E8F0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+          <div
+            onClick={() => setActiveTab('valid')}
+            style={{
+              backgroundColor: '#FFF',
+              padding: 16,
+              borderRadius: 12,
+              border: activeTab === 'valid' ? '2px solid #16A34A' : '1px solid #E2E8F0',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease'
+            }}
+          >
             <div style={{ fontSize: 12, color: '#64748B' }}>Đã chấm công hôm nay</div>
             <div style={{ fontSize: 24, fontWeight: 800, color: '#16A34A', marginTop: 4 }}>{summary.checkedInCount} người</div>
           </div>
-          <div style={{ backgroundColor: '#FFF', padding: 16, borderRadius: 12, border: '1px solid #E2E8F0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+
+          <div
+            onClick={() => setActiveTab('flags')}
+            style={{
+              backgroundColor: '#FFF',
+              padding: 16,
+              borderRadius: 12,
+              border: activeTab === 'flags' ? '2px solid #CA8A04' : '1px solid #E2E8F0',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease'
+            }}
+          >
             <div style={{ fontSize: 12, color: '#64748B' }}>Lượt cần xác nhận</div>
             <div style={{ fontSize: 24, fontWeight: 800, color: '#CA8A04', marginTop: 4 }}>{summary.reviewCount} lượt</div>
           </div>
-          <div style={{ backgroundColor: '#FFF', padding: 16, borderRadius: 12, border: '1px solid #E2E8F0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
+
+          <div
+            onClick={() => setActiveTab('devices')}
+            style={{
+              backgroundColor: '#FFF',
+              padding: 16,
+              borderRadius: 12,
+              border: activeTab === 'devices' ? '2px solid #0056B3' : '1px solid #E2E8F0',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+              cursor: 'pointer',
+              transition: 'all 0.15s ease'
+            }}
+          >
             <div style={{ fontSize: 12, color: '#64748B' }}>Thiết bị chờ duyệt</div>
             <div style={{ fontSize: 24, fontWeight: 800, color: '#0056B3', marginTop: 4 }}>{summary.pendingDevices} máy</div>
           </div>
+
           <div style={{ backgroundColor: '#FFF', padding: 16, borderRadius: 12, border: '1px solid #E2E8F0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
             <div style={{ fontSize: 12, color: '#64748B' }}>Đơn từ chờ duyệt</div>
             <div style={{ fontSize: 24, fontWeight: 800, color: '#E31837', marginTop: 4 }}>{summary.pendingRequests} đơn</div>
@@ -669,7 +777,7 @@ export const HrAttendanceView: React.FC = () => {
           }}
         >
           <ShieldAlert size={18} />
-          Lượt Cần Xác Nhận ({summary?.reviewCount || 0})
+          <span>Lượt Cần Xác Nhận ({totalPendingCount > 0 ? totalPendingCount : (summary?.reviewCount ?? punches.length ?? 0)})</span>
         </button>
 
         <button
@@ -689,7 +797,7 @@ export const HrAttendanceView: React.FC = () => {
           }}
         >
           <CheckCircle2 size={18} />
-          Chấm Công Hợp Lệ & Đã Duyệt
+          <span>Chấm Công Hợp Lệ & Đã Duyệt ({validPunches.length > 0 ? validPunches.length : (summary?.validCount ?? 0)})</span>
         </button>
 
         <button
@@ -709,7 +817,7 @@ export const HrAttendanceView: React.FC = () => {
           }}
         >
           <Smartphone size={18} />
-          Quản Lý Thiết Bị ({summary?.pendingDevices || 0})
+          <span>Quản Lý Thiết Bị ({devices.length > 0 ? devices.length : (summary?.pendingDevices ?? 0)})</span>
         </button>
 
         <button
@@ -729,7 +837,7 @@ export const HrAttendanceView: React.FC = () => {
           }}
         >
           <Wifi size={18} />
-          Vị Trí & Mạng Văn Phòng
+          <span>Vị Trí & Mạng Văn Phòng ({locations.length + networks.length})</span>
         </button>
 
         <button
@@ -749,7 +857,7 @@ export const HrAttendanceView: React.FC = () => {
           }}
         >
           <Send size={18} />
-          Bảng Công & Phản Hồi
+          <span>Bảng Công & Phản Hồi ({disputes.length})</span>
         </button>
       </div>
 
@@ -1212,14 +1320,24 @@ export const HrAttendanceView: React.FC = () => {
           {/* 4 Thẻ thống kê của kỳ công */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 14 }}>
             <div style={{ backgroundColor: '#FFF', padding: 16, borderRadius: 12, border: '1px solid #E2E8F0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-              <div style={{ fontSize: 12, color: '#64748B' }}>Tổng lượt chấm công hợp lệ</div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 12, color: '#64748B' }}>Tổng lượt chấm công hợp lệ</div>
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#16A34A', backgroundColor: '#DCFCE7', padding: '2px 8px', borderRadius: 9999 }}>
+                  Hôm nay: {validStats.todayPunches} lượt
+                </span>
+              </div>
               <div style={{ fontSize: 24, fontWeight: 800, color: '#16A34A', marginTop: 4 }}>{validStats.totalPunches} lượt</div>
               <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>Trong kỳ công đang chọn</div>
             </div>
             <div style={{ backgroundColor: '#FFF', padding: 16, borderRadius: 12, border: '1px solid #E2E8F0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
-              <div style={{ fontSize: 12, color: '#64748B' }}>Số nhân sự có mặt</div>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 12, color: '#64748B' }}>Số nhân sự có mặt</div>
+                <span style={{ fontSize: 11, fontWeight: 700, color: '#0056B3', backgroundColor: '#EFF6FF', padding: '2px 8px', borderRadius: 9999 }}>
+                  Hôm nay: {validStats.todayEmployees} người
+                </span>
+              </div>
               <div style={{ fontSize: 24, fontWeight: 800, color: '#0056B3', marginTop: 4 }}>{validStats.uniqueEmployees} người</div>
-              <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>Đã phát sinh lượt bấm</div>
+              <div style={{ fontSize: 11, color: '#94A3B8', marginTop: 2 }}>Đã phát sinh lượt bấm trong kỳ</div>
             </div>
             <div style={{ backgroundColor: '#FFF', padding: 16, borderRadius: 12, border: '1px solid #E2E8F0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
               <div style={{ fontSize: 12, color: '#64748B' }}>Chấm qua điện thoại</div>
@@ -1320,6 +1438,7 @@ export const HrAttendanceView: React.FC = () => {
                             <th style={{ padding: '10px 14px' }}>Phòng ban</th>
                             <th style={{ padding: '10px 14px', width: 90 }}>Giờ vào</th>
                             <th style={{ padding: '10px 14px', width: 90 }}>Giờ ra</th>
+                            <th style={{ padding: '10px 14px', minWidth: 150 }}>Thiết bị chấm công</th>
                             <th style={{ padding: '10px 14px', width: 70, textAlign: 'center' }}>Số lượt</th>
                             <th style={{ padding: '10px 14px' }}>Chi tiết các lượt bấm</th>
                             <th style={{ padding: '10px 14px' }}>Cơ sở</th>
@@ -1375,6 +1494,55 @@ export const HrAttendanceView: React.FC = () => {
                                   </span>
                                 </td>
 
+                                <td style={{ padding: '10px 14px' }}>
+                                  {(() => {
+                                    const devMap = new Map<string, { label: string; isPc: boolean; mac?: string; count: number }>();
+                                    for (const p of empPunches) {
+                                      const isPc = p.deviceType === 'PC' || p.channel === 'PC_WEB';
+                                      const key = isPc ? (p.deviceName ? `${p.deviceName} (PC)` : (p.deviceMac ? `PC: ${p.deviceMac}` : '💻 Máy tính PC'))
+                                                       : (p.deviceName ? `${p.deviceName} (Mobile)` : '📱 Điện thoại');
+                                      if (!devMap.has(key)) {
+                                        devMap.set(key, {
+                                          label: p.deviceName || (isPc ? 'Máy tính' : 'Điện thoại'),
+                                          isPc,
+                                          mac: isPc ? p.deviceMac : undefined,
+                                          count: 1
+                                        });
+                                      } else {
+                                        devMap.get(key)!.count++;
+                                      }
+                                    }
+                                    return (
+                                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                        {Array.from(devMap.values()).map((dev, idx) => (
+                                          <div
+                                            key={idx}
+                                            style={{
+                                              display: 'inline-flex',
+                                              alignItems: 'center',
+                                              gap: 5,
+                                              padding: '2px 8px',
+                                              borderRadius: 6,
+                                              fontSize: 11,
+                                              fontWeight: 600,
+                                              backgroundColor: dev.isPc ? '#EFF6FF' : '#F0FDF4',
+                                              color: dev.isPc ? '#1D4ED8' : '#15803D',
+                                              border: `1px solid ${dev.isPc ? '#BFDBFE' : '#BBF7D0'}`
+                                            }}
+                                            title={dev.mac ? `Địa chỉ MAC: ${dev.mac}` : (dev.isPc ? 'Máy tính chấm công' : 'Thiết bị di động')}
+                                          >
+                                            {dev.isPc ? <Laptop size={12} /> : <Smartphone size={12} />}
+                                            <span>{dev.label}</span>
+                                            {dev.mac && (
+                                              <span style={{ fontSize: 10, fontFamily: 'monospace', opacity: 0.85 }}>({dev.mac})</span>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    );
+                                  })()}
+                                </td>
+
                                 <td style={{ padding: '10px 14px', textAlign: 'center', fontWeight: 700, color: '#0F172A' }}>
                                   {empPunches.length}
                                 </td>
@@ -1383,9 +1551,12 @@ export const HrAttendanceView: React.FC = () => {
                                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                                     {empPunches.map((punch: any) => {
                                       const isApprove = punch.reviewState === 'ACCEPTED';
+                                      const isPc = punch.deviceType === 'PC' || punch.channel === 'PC_WEB';
+                                      const devLabel = punch.deviceInfo || (isPc ? `PC: ${punch.deviceName || punch.deviceMac || 'Máy tính'}` : `Mobile: ${punch.deviceName || 'Điện thoại'}`);
                                       return (
                                         <div
                                           key={punch.webLogId}
+                                          onClick={() => setInspectPunch(punch)}
                                           style={{
                                             display: 'inline-flex',
                                             alignItems: 'center',
@@ -1396,13 +1567,19 @@ export const HrAttendanceView: React.FC = () => {
                                             fontWeight: 600,
                                             backgroundColor: isApprove ? '#EFF6FF' : '#F0FDF4',
                                             border: `1px solid ${isApprove ? '#BFDBFE' : '#BBF7D0'}`,
-                                            color: isApprove ? '#1E40AF' : '#166534'
+                                            color: isApprove ? '#1E40AF' : '#166534',
+                                            cursor: 'pointer'
                                           }}
-                                          title={`Lượt chấm công hợp lệ: ${punch.timeLocal} (${punch.channel === 'MOBILE_PWA' ? 'Điện thoại' : 'Máy tính'})`}
+                                          title={`Bấm để xem chi tiết GPS & thiết bị: ${punch.timeLocal}\nThiết bị: ${devLabel}`}
                                         >
                                           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                                            {punch.channel === 'MOBILE_PWA' ? <Smartphone size={11} /> : <Laptop size={11} />}
+                                            {isPc ? <Laptop size={11} /> : <Smartphone size={11} />}
                                             <span>{punch.timeLocal}</span>
+                                            {punch.deviceMac && (
+                                              <span style={{ fontSize: 9, opacity: 0.75, fontFamily: 'monospace' }}>
+                                                {punch.deviceMac.length > 8 ? punch.deviceMac.substring(0, 8) + '…' : punch.deviceMac}
+                                              </span>
+                                            )}
                                             {isApprove && (
                                               <span style={{ fontSize: 9, padding: '1px 3px', borderRadius: 4, backgroundColor: '#DBEAFE', color: '#1E40AF' }}>
                                                 Duyệt
@@ -1542,6 +1719,7 @@ export const HrAttendanceView: React.FC = () => {
                               <th style={{ padding: '8px 12px' }}>Ngày làm việc</th>
                               <th style={{ padding: '8px 12px', width: 90 }}>Giờ vào</th>
                               <th style={{ padding: '8px 12px', width: 90 }}>Giờ ra</th>
+                              <th style={{ padding: '8px 12px', minWidth: 140 }}>Thiết bị</th>
                               <th style={{ padding: '8px 12px', width: 70, textAlign: 'center' }}>Số lượt</th>
                               <th style={{ padding: '8px 12px' }}>Chi tiết các lượt quẹt</th>
                               <th style={{ padding: '8px 12px' }}>Cơ sở</th>
@@ -1588,6 +1766,51 @@ export const HrAttendanceView: React.FC = () => {
                                       {outTime}
                                     </span>
                                   </td>
+                                  <td style={{ padding: '8px 12px' }}>
+                                    {(() => {
+                                      const devMap = new Map<string, { label: string; isPc: boolean; mac?: string }>();
+                                      for (const p of dayPunches) {
+                                        const isPc = p.deviceType === 'PC' || p.channel === 'PC_WEB';
+                                        const key = isPc ? (p.deviceName ? `${p.deviceName} (PC)` : (p.deviceMac ? `PC: ${p.deviceMac}` : '💻 Máy tính PC'))
+                                                         : (p.deviceName ? `${p.deviceName} (Mobile)` : '📱 Điện thoại');
+                                        if (!devMap.has(key)) {
+                                          devMap.set(key, {
+                                            label: p.deviceName || (isPc ? 'Máy tính' : 'Điện thoại'),
+                                            isPc,
+                                            mac: isPc ? p.deviceMac : undefined
+                                          });
+                                        }
+                                      }
+                                      return (
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                                          {Array.from(devMap.values()).map((dev, idx) => (
+                                            <div
+                                              key={idx}
+                                              style={{
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                gap: 4,
+                                                padding: '1px 6px',
+                                                borderRadius: 4,
+                                                fontSize: 10,
+                                                fontWeight: 600,
+                                                backgroundColor: dev.isPc ? '#EFF6FF' : '#F0FDF4',
+                                                color: dev.isPc ? '#1D4ED8' : '#15803D',
+                                                border: `1px solid ${dev.isPc ? '#BFDBFE' : '#BBF7D0'}`
+                                              }}
+                                              title={dev.mac ? `Địa chỉ MAC: ${dev.mac}` : (dev.isPc ? 'Máy tính chấm công' : 'Thiết bị di động')}
+                                            >
+                                              {dev.isPc ? <Laptop size={10} /> : <Smartphone size={10} />}
+                                              <span>{dev.label}</span>
+                                              {dev.mac && (
+                                                <span style={{ fontSize: 9, fontFamily: 'monospace', opacity: 0.85 }}>({dev.mac.length > 8 ? dev.mac.substring(0, 8) + '…' : dev.mac})</span>
+                                              )}
+                                            </div>
+                                          ))}
+                                        </div>
+                                      );
+                                    })()}
+                                  </td>
                                   <td style={{ padding: '8px 12px', textAlign: 'center', fontWeight: 700 }}>
                                     {dayPunches.length}
                                   </td>
@@ -1595,9 +1818,12 @@ export const HrAttendanceView: React.FC = () => {
                                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                                       {dayPunches.map((punch: any) => {
                                         const isApprove = punch.reviewState === 'ACCEPTED';
+                                        const isPc = punch.deviceType === 'PC' || punch.channel === 'PC_WEB';
+                                        const devLabel = punch.deviceInfo || (isPc ? `PC: ${punch.deviceName || punch.deviceMac || 'Máy tính'}` : `Mobile: ${punch.deviceName || 'Điện thoại'}`);
                                         return (
                                           <div
                                             key={punch.webLogId}
+                                            onClick={() => setInspectPunch(punch)}
                                             style={{
                                               display: 'inline-flex',
                                               alignItems: 'center',
@@ -1609,11 +1835,18 @@ export const HrAttendanceView: React.FC = () => {
                                               backgroundColor: isApprove ? '#EFF6FF' : '#F0FDF4',
                                               border: `1px solid ${isApprove ? '#BFDBFE' : '#BBF7D0'}`,
                                               color: isApprove ? '#1E40AF' : '#166534',
+                                              cursor: 'pointer'
                                             }}
+                                            title={`Bấm để xem chi tiết GPS & thiết bị: ${punch.timeLocal}\nThiết bị: ${devLabel}`}
                                           >
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                                              {punch.channel === 'MOBILE_PWA' ? <Smartphone size={10} /> : <Laptop size={10} />}
+                                              {isPc ? <Laptop size={10} /> : <Smartphone size={10} />}
                                               <span>{punch.timeLocal}</span>
+                                              {punch.deviceMac && (
+                                                <span style={{ fontSize: 9, opacity: 0.75, fontFamily: 'monospace' }}>
+                                                  {punch.deviceMac.length > 8 ? punch.deviceMac.substring(0, 8) + '…' : punch.deviceMac}
+                                                </span>
+                                              )}
                                               {isApprove && <span style={{ fontSize: 9 }}>Duyệt</span>}
                                             </div>
                                             <button
@@ -1710,13 +1943,24 @@ export const HrAttendanceView: React.FC = () => {
                       <td style={{ padding: '10px 12px', textAlign: 'right' }}>
                         <div style={{ display: 'inline-flex', gap: 6 }}>
                           {d.deviceType === 'PC' && (
-                            <button
-                              onClick={() => handleUpdateDeviceMac(d.deviceBindingId, d.fingerprintHash)}
-                              style={{ backgroundColor: '#EFF6FF', color: '#0056B3', border: '1px solid #BFDBFE', padding: '5px 10px', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
-                              title="Chỉnh sửa hoặc gán địa chỉ MAC cho máy tính"
-                            >
-                              Sửa MAC
-                            </button>
+                            <>
+                              <button
+                                onClick={() => handleUpdateDeviceMac(d.deviceBindingId, d.fingerprintHash)}
+                                style={{ backgroundColor: '#EFF6FF', color: '#0056B3', border: '1px solid #BFDBFE', padding: '5px 10px', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
+                                title="Chỉnh sửa hoặc gán địa chỉ MAC cho máy tính"
+                              >
+                                Sửa MAC
+                              </button>
+                              {d.fingerprintHash && (
+                                <button
+                                  onClick={() => handleDeleteDeviceMac(d.deviceBindingId, d.fingerprintHash)}
+                                  style={{ backgroundColor: '#FEF2F2', color: '#DC2626', border: '1px solid #FECACA', padding: '5px 10px', borderRadius: 6, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}
+                                  title="Xóa hoàn toàn địa chỉ MAC khỏi máy tính này"
+                                >
+                                  Xóa MAC
+                                </button>
+                              )}
+                            </>
                           )}
                           {d.approvalStatus === 'PENDING' ? (
                             <>
@@ -2384,12 +2628,22 @@ export const HrAttendanceView: React.FC = () => {
                 </div>
 
                 <div style={{ border: '1px solid #E2E8F0', borderRadius: 8, padding: 10, backgroundColor: '#FAFAFA' }}>
-                  <div style={{ fontSize: 11, color: '#64748B', fontWeight: 600 }}>THIẾT BỊ SỬ DỤNG</div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: '#0F172A', marginTop: 2, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }} title={inspectPunch.deviceInfo}>
-                    {inspectPunch.deviceInfo || inspectPunch.channel}
+                  <div style={{ fontSize: 11, color: '#64748B', fontWeight: 600 }}>THIẾT BỊ CHẤM CÔNG</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0F172A', marginTop: 2 }}>
+                    {inspectPunch.deviceType === 'PC' || inspectPunch.channel === 'PC_WEB' ? '💻 Máy tính (PC)' : '📱 Điện thoại (Mobile)'}: {inspectPunch.deviceName || (inspectPunch.deviceType === 'PC' ? 'Máy tính PC' : 'Điện thoại')}
                   </div>
+                  {inspectPunch.deviceMac && (
+                    <div style={{ fontSize: 11, color: '#0056B3', fontFamily: 'monospace', fontWeight: 700, marginTop: 2 }}>
+                      MAC Address: {inspectPunch.deviceMac}
+                    </div>
+                  )}
+                  {(inspectPunch.operatingSystem || inspectPunch.browserInfo) && (
+                    <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>
+                      {[inspectPunch.operatingSystem, inspectPunch.browserInfo].filter(Boolean).join(' · ')}
+                    </div>
+                  )}
                   <div style={{ fontSize: 11, color: '#64748B', marginTop: 2 }}>
-                    Trạng thái cờ: <strong>{inspectPunch.reviewState}</strong>
+                    Trạng thái cờ: <strong>{inspectPunch.reviewState === 'ACCEPTED' ? 'Đã duyệt' : inspectPunch.reviewState === 'REJECTED' ? 'Đã từ chối' : inspectPunch.reviewState === 'PENDING' ? 'Chờ duyệt' : 'Bình thường'}</strong>
                   </div>
                 </div>
               </div>

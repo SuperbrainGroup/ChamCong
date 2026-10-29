@@ -75,6 +75,7 @@ public class Employee
     public DateTime StartDate { get; set; }
     public DateTime? EndDate { get; set; }
     public bool ExemptPunch { get; set; }
+    public string EmployeeType { get; set; } = "STANDARD"; // STANDARD | REMOTE | PARTTIME
     public string AttendanceSource { get; set; } = "APP"; // APP | FILE
     public string? DefaultNote { get; set; }
     public int SortOrder { get; set; }
@@ -521,6 +522,8 @@ public class Notification
 {
     public long NotificationId { get; set; }
     public int UserId { get; set; }
+    public int? CompanyId { get; set; }
+    public string? BranchCode { get; set; }
     public string Title { get; set; } = "";
     public string? Body { get; set; }
     public string? LinkType { get; set; }
@@ -560,5 +563,19 @@ public class PlatformSetting
     public string? Description { get; set; }
     public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
     public string? UpdatedBy { get; set; }
+}
+
+public class WorkSchedule
+{
+    public int ScheduleId { get; set; }
+    public int CompanyId { get; set; }
+    public int? EmployeeId { get; set; }
+    public string EmployeeCode { get; set; } = "";
+    public DateTime WorkDate { get; set; }
+    public string ShiftCode { get; set; } = "FULL"; // FULL | MORNING | AFTERNOON
+    public string? Note { get; set; }
+    public string Status { get; set; } = "REGISTERED"; // REGISTERED | CANCELLED
+    public DateTime RegisteredAtUtc { get; set; } = DateTime.UtcNow;
+    public string? RegisteredBy { get; set; }
 }
 

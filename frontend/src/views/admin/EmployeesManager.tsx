@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { Employee, Department, EmployeeGroup, LeaveFund, LeaveLedgerItem, LeaveRequest } from '../../types';
 import { api } from '../../api/client';
+import { DateInput } from '../../components/DateInput';
 import {
   UserCheck,
   Plus,
@@ -31,7 +32,8 @@ interface EmployeesManagerProps {
 }
 
 export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) => {
-  const { selectedCompany } = useAuth();
+  const { selectedCompany, user } = useAuth();
+  const isAdmin = user?.role === 'Admin';
   const toast = useToast();
   const currentYear = new Date().getFullYear();
   const [activeTab, setActiveTab] = useState<'employees' | 'departments' | 'groups'>('employees');
@@ -54,6 +56,8 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
   const [endDate, setEndDate] = useState('');
   const [exemptPunch, setExemptPunch] = useState(false);
   const [defaultNote, setDefaultNote] = useState('');
+  const [employeeType, setEmployeeType] = useState<'STANDARD' | 'REMOTE' | 'PARTTIME'>('STANDARD');
+  const [filterType, setFilterType] = useState<string>('ALL');
   const [sortOrder, setSortOrder] = useState(0);
   const [createUserAccount, setCreateUserAccount] = useState(true);
   const [accountPassword, setAccountPassword] = useState('123456');
@@ -139,6 +143,7 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
     setStartDate(new Date().toISOString().split('T')[0]);
     setEndDate('');
     setExemptPunch(false);
+    setEmployeeType('STANDARD');
     setDefaultNote('');
     setSortOrder(employees.length + 1);
     setEmpError(null);
@@ -154,6 +159,7 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
     setStartDate(e.startDate ? e.startDate.split('T')[0] : '');
     setEndDate(e.endDate ? e.endDate.split('T')[0] : '');
     setExemptPunch(e.exemptPunch);
+    setEmployeeType((e.employeeType as any) || 'STANDARD');
     setDefaultNote(e.defaultNote || '');
     setSortOrder(e.sortOrder);
     setEmpError(null);
@@ -178,6 +184,7 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
       startDate: startDate,
       endDate: endDate || null,
       exemptPunch: exemptPunch,
+      employeeType: employeeType,
       defaultNote: defaultNote.trim() || null,
       sortOrder: sortOrder,
       createUserAccount: !editingEmpId ? createUserAccount : false,
@@ -227,39 +234,51 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
   const handleDeleteEmp = async (e: Employee) => {
     if (!selectedCompany) return;
 
-    // Nếu nhân viên có dữ liệu chấm công, hỏi xóa cưỡng bức (chỉ Admin)
-    const confirmed = await toast.confirm({
-      title: 'Xóa nhân viên',
-      message: `Muốn xóa nhân viên ${e.fullName} (${e.employeeCode})? Nếu có dữ liệu chấm công, hệ thống sẽ tự động xóa cưỡng bức toàn bộ.`,
-      confirmText: 'Xóa nhân viên',
-      type: 'danger'
+    // BƯỚC 1: Toast confirm xác nhận xóa nhân sự
+    const confirmedStep1 = await toast.confirm({
+      title: 'Xác nhận xóa nhân sự (Bước 1/2)',
+      message: `Bạn có chắc chắn muốn xóa nhân sự ${e.fullName} (Mã: ${e.employeeCode}) khỏi hội sở ${selectedCompany.name}?`,
+      confirmText: 'Tiếp tục xóa',
+      cancelText: 'Hủy bỏ',
+      type: 'warning'
     });
-    if (!confirmed) return;
+    if (!confirmedStep1) return;
 
     try {
-      await api.delete(`/companies/${selectedCompany.id}/employees/${e.id}`);
-      toast.success(`Đã xóa nhân viên ${e.fullName} thành công.`);
+      // Thử xóa thông thường
+      const res = await api.delete(`/companies/${selectedCompany.id}/employees/${e.id}`);
+      toast.success(res.data?.message || `Đã xóa nhân viên ${e.fullName} thành công.`);
       fetchData();
     } catch (err: any) {
       const errMsg: string = err.response?.data?.message || '';
-      // Nếu lỗi vì có dữ liệu chấm công -> hỏi xóa cưỡng bức
-      if (errMsg.includes('dữ liệu chấm công') || errMsg.includes('Ngày nghỉ việc')) {
-        const forceConfirmed = await toast.confirm({
-          title: 'Xóa cưỡng bức toàn bộ dữ liệu?',
-          message: `Nhân viên ${e.fullName} đã có dữ liệu chấm công. Xóa sẽ xóa hoàn toàn khỏi hệ thống bao gồm mọi bản ghi chấm công. Không thể phục hồi! Bạn có chắc chắn không?`,
-          confirmText: 'Xóa hoàn toàn',
+      const hasAttendanceData: boolean = err.response?.data?.hasAttendanceData || errMsg.includes('dữ liệu chấm công') || errMsg.includes('Ngày nghỉ việc');
+
+      // Nếu nhân sự đã có dữ liệu chấm công:
+      if (hasAttendanceData) {
+        if (!isAdmin) {
+          toast.error(errMsg || 'Nhân viên đã có dữ liệu chấm công trong hệ thống. Chỉ Quản trị viên (Admin) mới có quyền xóa vĩnh viễn nhân sự này, hoặc bạn hãy thiết lập Ngày nghỉ việc.');
+          return;
+        }
+
+        // BƯỚC 2: Toast confirm nguy hiểm cấp cao cho Admin
+        const confirmedStep2 = await toast.confirm({
+          title: '⚠️ CẢNH BÁO NGUY HIỂM: Xóa vĩnh viễn (Bước 2/2)',
+          message: `Nhân viên ${e.fullName} (${e.employeeCode}) ĐÃ CÓ DỮ LIỆU CHẤM CÔNG trong hệ thống. Thao tác này sẽ xóa VĨNH VIỄN nhân sự cùng TOÀN BỘ dữ liệu: lịch sử quẹt thẻ, kết quả công các tháng, quỹ phép, đơn giải trình và thiết bị chấm công. Dữ liệu KHÔNG THỂ KHÔI PHỤC! Bạn có chắc chắn 100% muốn xóa sạch không?`,
+          confirmText: 'XÓA VĨNH VIỄN TẤT CẢ',
+          cancelText: 'Hủy bỏ',
           type: 'danger'
         });
-        if (!forceConfirmed) return;
+        if (!confirmedStep2) return;
+
         try {
-          const res = await api.delete(`/companies/${selectedCompany.id}/employees/${e.id}/force`);
-          toast.success(res.data?.message || `Đã xóa hoàn toàn nhân viên ${e.fullName}.`);
+          const forceRes = await api.delete(`/companies/${selectedCompany.id}/employees/${e.id}/force`);
+          toast.success(forceRes.data?.message || `Đã xóa vĩnh viễn nhân viên ${e.fullName} và toàn bộ dữ liệu chấm công liên quan.`);
           fetchData();
         } catch (err2: any) {
           toast.error(err2.response?.data?.message || 'Xóa cưỡng bức thất bại.');
         }
       } else {
-        toast.error(errMsg || 'Không thể xóa nhân viên');
+        toast.error(errMsg || 'Không thể xóa nhân viên.');
       }
     }
   };
@@ -435,6 +454,7 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
   const filteredEmployees = employees.filter((e) => {
     const isTerminated = e.endDate && e.endDate.split('T')[0] <= today;
     if (!showTerminated && isTerminated) return false;
+    if (filterType !== 'ALL' && (e.employeeType || 'STANDARD') !== filterType) return false;
     return (
       e.employeeCode.toLowerCase().includes(search.toLowerCase()) ||
       e.fullName.toLowerCase().includes(search.toLowerCase()) ||
@@ -568,7 +588,19 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
               />
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <select
+                className="form-control form-control-sm"
+                style={{ width: '160px' }}
+                value={filterType}
+                onChange={(e) => setFilterType(e.target.value)}
+              >
+                <option value="ALL">Tất cả hình thức</option>
+                <option value="STANDARD">Nhân sự Chuẩn</option>
+                <option value="REMOTE">Nhân sự Remote</option>
+                <option value="PARTTIME">Nhân sự Part-time</option>
+              </select>
+
               <button
                 type="button"
                 className={`btn btn-sm ${showTerminated ? 'btn-primary' : 'btn-secondary'}`}
@@ -608,12 +640,24 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
                   <tbody>
                     {filteredEmployees.map((e, idx) => {
                       const fund = funds[e.id];
-                      const remaining = fund ? fund.totalRemaining : 0;
+                      const remaining = fund ? (fund.availableBalance ?? fund.totalRemaining ?? 0) : 0;
                       return (
                         <tr key={e.id}>
                           <td style={{ textAlign: 'center' }}>{e.sortOrder || idx + 1}</td>
                           <td style={{ fontWeight: 800, color: '#0056B3', fontFamily: 'monospace' }}>{e.employeeCode}</td>
-                          <td style={{ fontWeight: 600 }}>{e.fullName}</td>
+                          <td style={{ fontWeight: 600 }}>
+                            {e.fullName}
+                            {e.employeeType === 'REMOTE' && (
+                              <span className="badge" style={{ backgroundColor: '#e0f2fe', color: '#0369a1', fontSize: '10px', marginLeft: '6px' }}>
+                                Remote
+                              </span>
+                            )}
+                            {e.employeeType === 'PARTTIME' && (
+                              <span className="badge" style={{ backgroundColor: '#fef3c7', color: '#92400e', fontSize: '10px', marginLeft: '6px' }}>
+                                Part-time
+                              </span>
+                            )}
+                          </td>
                           <td>{e.departmentName || '-'}</td>
                           <td>
                             <span className="badge badge-neutral" style={{ fontSize: '11px' }}>{e.groupName}</span>
@@ -887,23 +931,37 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
                   </div>
 
                   <div className="form-group">
-                    <label className="form-label" style={{ fontWeight: 600 }}>Ngày bắt đầu làm việc (*)</label>
-                    <input
-                      type="date"
+                    <label className="form-label" style={{ fontWeight: 600 }}>Hình thức nhân sự (*)</label>
+                    <select
                       className="form-control"
+                      value={employeeType}
+                      onChange={(e) => setEmployeeType(e.target.value as any)}
+                    >
+                      <option value="STANDARD">Nhân sự Chuẩn (Toàn thời gian tại cơ sở)</option>
+                      <option value="REMOTE">Nhân sự Remote (Từ xa / Tại nhà)</option>
+                      <option value="PARTTIME">Nhân sự Part-time (Bán thời gian)</option>
+                    </select>
+                    <small style={{ fontSize: '11px', color: '#64748b', display: 'block', marginTop: '4px' }}>
+                      {employeeType === 'REMOTE' && 'Check-in tại nhà, tính đủ công tháng (ví dụ 25/25 ngày). Đăng ký lịch làm việc trước.'}
+                      {employeeType === 'PARTTIME' && 'Đăng ký lịch làm việc trước. Ngày ngoài lịch không cần giải trình. Làm thêm ngày vẫn tính đủ công.'}
+                      {employeeType === 'STANDARD' && 'Chấm công tại cơ sở theo ca và quy chế chấm công chuẩn.'}
+                    </small>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label" style={{ fontWeight: 600 }}>Ngày bắt đầu làm việc (*)</label>
+                    <DateInput
                       value={startDate}
-                      onChange={(e) => setStartDate(e.target.value)}
+                      onChange={(val) => setStartDate(val)}
                       required
                     />
                   </div>
 
                   <div className="form-group">
                     <label className="form-label">Ngày nghỉ việc (Nếu có)</label>
-                    <input
-                      type="date"
-                      className="form-control"
+                    <DateInput
                       value={endDate}
-                      onChange={(e) => setEndDate(e.target.value)}
+                      onChange={(val) => setEndDate(val)}
                     />
                   </div>
 
@@ -1228,7 +1286,7 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
                     <div style={{ backgroundColor: '#eff6ff', padding: '12px', borderRadius: '8px', border: '1px solid #bfdbfe' }}>
                       <div style={{ fontSize: '12px', color: '#1e40af', fontWeight: 700 }}>Tổng Phép Còn Lại</div>
                       <div style={{ fontSize: '20px', fontWeight: 900, color: '#1e3a8a', marginTop: '4px' }}>
-                        {funds[viewingLeaveEmp.id].totalRemaining.toFixed(1)} ngày
+                        {(funds[viewingLeaveEmp.id]?.availableBalance ?? funds[viewingLeaveEmp.id]?.totalRemaining ?? 0).toFixed(1)} ngày
                       </div>
                     </div>
                   </div>
@@ -1455,12 +1513,10 @@ export const EmployeesManager: React.FC<EmployeesManagerProps> = ({ onBack }) =>
                   <label className="form-label" style={{ fontWeight: 700 }}>
                     Ngày chính thức nghỉ việc <span style={{ color: 'red' }}>*</span>
                   </label>
-                  <input
-                    type="date"
-                    className="form-control"
+                  <DateInput
                     required
                     value={terminateDate}
-                    onChange={(e) => setTerminateDate(e.target.value)}
+                    onChange={(val) => setTerminateDate(val)}
                   />
                   <small style={{ color: '#64748b', fontSize: '12px', marginTop: '4px', display: 'block' }}>
                     Nhân viên nghỉ việc sẽ được tự động ẩn khỏi Bảng chấm công các kỳ sau, giúp BCC luôn gọn gàng và không còn nhân sự đã nghỉ việc.

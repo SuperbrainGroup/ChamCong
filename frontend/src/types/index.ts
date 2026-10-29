@@ -5,6 +5,7 @@ export interface User {
   role: 'Admin' | 'HR' | 'Employee';
   roles?: string[];
   employeeCode?: string;
+  employeeType?: 'STANDARD' | 'PARTTIME' | 'REMOTE' | string;
   privacyConsentAtUtc?: string;
   isActive: boolean;
   isLocked: boolean;
@@ -40,6 +41,12 @@ export interface PunchItem {
   channel: string;
   ipOk?: boolean;
   gpsState?: string;
+  deviceInfo?: string;
+  deviceName?: string;
+  deviceType?: string;
+  deviceMac?: string;
+  operatingSystem?: string;
+  browserInfo?: string;
 }
 
 export interface PunchState {
@@ -51,6 +58,8 @@ export interface PunchState {
   firstPunchTime?: string;
   lastPunchTime?: string;
   todayPunchCount: number;
+  totalPunchLogs?: number;
+  validPunchCount?: number;
   clientPublicIp: string;
   pcMacAddress?: string;
   pcApprovalStatus?: string;
@@ -95,38 +104,157 @@ export interface UserRequestItem {
   reason: string;
   actualTimeIn?: string;
   actualTimeOut?: string;
+  actualIn?: string;
+  actualOut?: string;
   status: 'PENDING_HR' | 'APPROVED' | 'REJECTED' | 'CANCELLED';
   hrNote?: string;
   createdAt: string;
   attachmentCount: number;
+  attachments?: Array<{
+    attachmentId: number;
+    originalFileName: string;
+    fileSizeBytes: number;
+    mimeType: string;
+  }>;
 }
 
 export interface LeaveBalanceSummary {
   year: number;
+  month?: number;
   annualOpening: number;
   carryOpening: number;
   compOpening: number;
+  opening?: number;
+  accrued?: number;
   totalOpening: number;
+  totalEarned?: number;
+  monthUsed?: number;
+  monthAnnualUsed?: number;
   used: number;
   held: number;
   available: number;
+  isExhausted?: boolean;
+}
+
+export interface TimesheetDayItem {
+  date: string;
+  dateDisplay: string;
+  day: number;
+  dayOfWeek: string;
+  code: string;
+  codeName: string;
+  color?: string;
+  inTime?: string | null;
+  outTime?: string | null;
+  workedMinutes: number;
+  lateMinutes: number;
+  earlyMinutes: number;
+  isLate: boolean;
+  isEarly: boolean;
+  isLeave: boolean;
+  leaveCategory: 'ANNUAL_LEAVE' | 'PAID_LEAVE' | 'UNPAID_LEAVE' | 'HOLIDAY' | 'WEEKEND_OFF' | 'WORK';
+  categoryLabel: string;
+  paidValue: number;
+  isManual: boolean;
+  manualReason?: string | null;
+  isOutOfEmployment: boolean;
+  hasDispute?: boolean;
+  disputeStatus?: string;
+  disputeContent?: string;
+  disputeResponse?: string;
+}
+
+export interface TimesheetPeriodItem {
+  id: number;
+  month: number;
+  year: number;
+  name: string;
+  status: string;
+  isClosed: boolean;
+}
+
+export interface EmployeeBriefItem {
+  id: number;
+  employeeCode: string;
+  fullName: string;
+  departmentId?: number;
+  departmentName?: string;
+  companyId: number;
+  startDate: string;
+}
+
+export interface TimesheetDisputeItem {
+  disputeId: number;
+  workDate?: string;
+  content: string;
+  status: string;
+  hrResponse?: string;
+  createdAt: string;
 }
 
 export interface PublishedTimesheetData {
   isPublished: boolean;
+  isClosed?: boolean;
   message?: string;
   publicationId?: number;
   versionNo?: number;
   publishedAt?: string;
+  period?: {
+    id: number;
+    month: number;
+    year: number;
+    fromDate: string;
+    toDate: string;
+    standardDays: number;
+    status: string;
+    closedAt?: string;
+    closedBy?: string;
+  };
+  availablePeriods?: TimesheetPeriodItem[];
+  employee?: {
+    id: number;
+    employeeCode: string;
+    fullName: string;
+    departmentName?: string;
+    startDate?: string;
+    tenureYears?: number;
+    tenureDisplay?: string;
+  };
+  employeesList?: EmployeeBriefItem[];
+  disputes?: TimesheetDisputeItem[];
+  leaveBalance?: {
+    year: number;
+    month?: number;
+    annualOpening: number;
+    carryOpening: number;
+    compOpening: number;
+    opening?: number;
+    accrued?: number;
+    totalOpening: number;
+    totalEarned?: number;
+    monthUsed?: number;
+    monthAnnualUsed?: number;
+    used: number;
+    held: number;
+    available: number;
+    isExhausted?: boolean;
+  };
   summary?: {
     workDays: number;
     holidayDays: number;
     annualLeaveDays: number;
     paidLeaveDays: number;
     unpaidLeaveDays: number;
+    totalLeaveDays?: number;
     paidDays: number;
-    lateEarlyMinutes: number;
+    lateArrivalCount: number;
+    earlyDepartureCount?: number;
+    totalLateEarlyOccurrences?: number;
+    lateEarlyDaysCount?: number;
+    totalLateMinutes: number;
+    totalEarlyMinutes: number;
   };
+  days?: TimesheetDayItem[];
   dailyCodes?: { dayIndex: number; code: string }[];
 }
 
@@ -163,6 +291,11 @@ export interface HrDashboardSummary {
 
 export interface AppNotification {
   notificationId: number;
+  userId?: number;
+  companyId?: number;
+  companyCode?: string;
+  companyName?: string;
+  branchCode?: string;
   title: string;
   body?: string;
   linkType?: string;
@@ -206,6 +339,7 @@ export interface Employee {
   startDate: string;
   endDate?: string;
   exemptPunch: boolean;
+  employeeType?: 'STANDARD' | 'REMOTE' | 'PARTTIME';
   defaultNote?: string;
   sortOrder: number;
   hasAccount?: boolean;
@@ -299,12 +433,26 @@ export interface GridEmployeeRow {
     departmentName: string;
     groupName: string;
     exemptPunch: boolean;
+    employeeType?: 'STANDARD' | 'REMOTE' | 'PARTTIME' | string;
     defaultNote?: string;
     startDate?: string;
     endDate?: string;
   };
   note: string;
   summary: MonthSummary;
+  leaveBalance?: {
+    annualOpening: number;
+    carryOpening: number;
+    opening: number;
+    accrued: number;
+    totalEarned: number;
+    monthUsed: number;
+    monthAnnualUsed: number;
+    totalUsed: number;
+    used?: number;
+    available: number;
+    isExhausted: boolean;
+  } | null;
   days: GridDayCell[];
 }
 
@@ -400,13 +548,24 @@ export interface LeaveFund {
   employeeCode: string;
   fullName: string;
   year: number;
+  month?: number | null;
   annualOpening: number;
   carryOpening: number;
   compOpening: number;
-  annualUsed: number;
-  carryUsed: number;
-  compUsed: number;
-  totalRemaining: number;
+  opening?: number;
+  accrued?: number;
+  totalAnnualEarned?: number;
+  totalEarned?: number;
+  monthUsed?: number;
+  monthAnnualUsed?: number;
+  annualUsed?: number;
+  carryUsed?: number;
+  compUsed?: number;
+  totalUsed: number;
+  pendingDays?: number;
+  totalRemaining?: number;
+  availableBalance: number;
+  isExhausted?: boolean;
 }
 
 export interface LeaveLedgerItem {
@@ -415,10 +574,12 @@ export interface LeaveLedgerItem {
   periodId?: number;
   year: number;
   date: string;
-  fund: 'ANNUAL' | 'CARRY' | 'COMP';
+  fund: 'ANNUAL' | 'CARRY' | 'COMP' | string;
   amount: number;
   balanceAfter: number;
+  code?: string;
   reason?: string;
+  note?: string;
   createdAt: string;
 }
 
@@ -439,5 +600,21 @@ export interface AuditLogPaged {
   totalCount: number;
   pageIndex: number;
   pageSize: number;
+}
+
+export interface WorkSchedule {
+  id?: number;
+  scheduleId: number;
+  companyId: number;
+  employeeId?: number;
+  employeeCode: string;
+  employeeName?: string;
+  employeeType?: 'STANDARD' | 'REMOTE' | 'PARTTIME' | string;
+  workDate: string;
+  shiftCode: 'FULL' | 'MORNING' | 'AFTERNOON' | string;
+  note?: string;
+  status: 'REGISTERED' | 'CANCELLED' | string;
+  registeredAtUtc: string;
+  registeredBy?: string;
 }
 

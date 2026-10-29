@@ -166,7 +166,9 @@ public class ParametersController : ControllerBase
         int CheckoutPrepareMinutes,
         string CheckoutStartTime,
         string StandardHoursRange,
-        string CompanyName
+        string CompanyName,
+        int GracePeriodMinutes,
+        int GraceMaxTimesMonth
     );
 
     public record SaveShiftHoursRequestDto(
@@ -174,7 +176,9 @@ public class ParametersController : ControllerBase
         string ShiftEnd,
         string? LunchStart,
         int? LunchMinutes,
-        int? CheckoutPrepareMinutes
+        int? CheckoutPrepareMinutes,
+        int? GracePeriodMinutes,
+        int? GraceMaxTimesMonth
     );
 
     [HttpGet("companies/{companyId}/shift-hours")]
@@ -202,6 +206,14 @@ public class ParametersController : ControllerBase
         int.TryParse(lunchMinutesStr, out var lunchMinutes);
         if (lunchMinutes <= 0) lunchMinutes = 60;
 
+        var gracePeriodMinutesStr = GetParam(ParamCatalog.GracePeriodMinutes, "10");
+        int.TryParse(gracePeriodMinutesStr, out var gracePeriodMinutes);
+        if (gracePeriodMinutes < 0) gracePeriodMinutes = 10;
+
+        var graceMaxTimesMonthStr = GetParam(ParamCatalog.GraceMaxTimesMonth, "2");
+        int.TryParse(graceMaxTimesMonthStr, out var graceMaxTimesMonth);
+        if (graceMaxTimesMonth < 0) graceMaxTimesMonth = 2;
+
         TimeUtil.TryParseRange(shiftHours, out var startMin, out var endMin);
         if (startMin <= 0 && endMin <= 0)
         {
@@ -220,7 +232,9 @@ public class ParametersController : ControllerBase
             prepareMinutes,
             TimeUtil.FormatHm(checkoutStartMin),
             $"{TimeUtil.FormatHm(startMin)}-{TimeUtil.FormatHm(endMin)}",
-            company.Name
+            company.Name,
+            gracePeriodMinutes,
+            graceMaxTimesMonth
         ));
     }
 
@@ -244,6 +258,12 @@ public class ParametersController : ControllerBase
         var lunchStart = string.IsNullOrWhiteSpace(dto.LunchStart) ? "12:00" : dto.LunchStart.Trim();
         var lunchMinutes = dto.LunchMinutes.GetValueOrDefault(60);
         if (lunchMinutes < 0 || lunchMinutes > 240) lunchMinutes = 60;
+
+        var gracePeriodMinutes = dto.GracePeriodMinutes.GetValueOrDefault(10);
+        if (gracePeriodMinutes < 0 || gracePeriodMinutes > 120) gracePeriodMinutes = 10;
+
+        var graceMaxTimesMonth = dto.GraceMaxTimesMonth.GetValueOrDefault(2);
+        if (graceMaxTimesMonth < 0 || graceMaxTimesMonth > 31) graceMaxTimesMonth = 2;
 
         var flexInWindow = $"{TimeUtil.FormatHm(startMin)}-{TimeUtil.FormatHm(startMin + 10)}";
         var flexOutWindow = $"{TimeUtil.FormatHm(endMin)}-{TimeUtil.FormatHm(endMin + 10)}";
@@ -280,10 +300,12 @@ public class ParametersController : ControllerBase
         await UpsertParamAsync(ParamCatalog.LunchBreakMinutes, lunchMinutes.ToString());
         await UpsertParamAsync(ParamCatalog.FlexInWindow, flexInWindow);
         await UpsertParamAsync(ParamCatalog.FlexOutWindow, flexOutWindow);
+        await UpsertParamAsync(ParamCatalog.GracePeriodMinutes, gracePeriodMinutes.ToString());
+        await UpsertParamAsync(ParamCatalog.GraceMaxTimesMonth, graceMaxTimesMonth.ToString());
 
-        _audit.Log("CompanyShift", companyId.ToString(), "Update", new { companyId, shiftRange, lunchStart, lunchMinutes }, companyId: companyId);
+        _audit.Log("CompanyShift", companyId.ToString(), "Update", new { companyId, shiftRange, lunchStart, lunchMinutes, gracePeriodMinutes, graceMaxTimesMonth }, companyId: companyId);
         await _db.SaveChangesAsync(ct);
 
-        return Ok(new { message = $"Đã cập nhật ca làm việc hội sở thành công: {shiftRange} (nghỉ trưa: {lunchStart}, {lunchMinutes} phút)." });
+        return Ok(new { message = $"Đã cập nhật ca làm việc hội sở thành công: {shiftRange} (nghỉ trưa: {lunchStart}, {lunchMinutes} phút; du di: {gracePeriodMinutes} phút, tối đa {graceMaxTimesMonth} lần/tháng)." });
     }
 }

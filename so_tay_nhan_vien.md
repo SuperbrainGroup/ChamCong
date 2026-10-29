@@ -1,12 +1,17 @@
 # SỔ TAY HƯỚNG DẪN SỬ DỤNG PHẦN MỀM CHẤM CÔNG SUPERBRAIN
-## 📱 PHẦN DÀNH CHO NHÂN VIÊN (BẢN DỄ HIỂU - CẦM TAY CHỈ VIỆC)
+## 📱 PHẦN DÀNH CHO NHÂN VIÊN & NHÂN SỰ TỰ CHẤM CÔNG (BẢN DỄ HIỂU - CẦM TAY CHỈ VIỆC)
 
 ---
 
-## LỜI MỞ ĐẦU
-Chào bạn! Đây là cuốn **Sổ tay hướng dẫn nhanh** giúp bạn dễ dàng làm quen và sử dụng phần mềm chấm công Superbrain mỗi ngày. 
+## LỜI MỞ ĐẦU: CƠ CHẾ NHÂN SỰ TỰ CHẤM CÔNG CHỦ ĐỘNG & MINH BẠCH
 
-Tài liệu này được viết theo phong cách gần gũi, đơn giản, từng bước rõ ràng để bất kỳ ai cũng có thể thực hiện được ngay từ lần đầu tiên mà không gặp bất kỳ khó khăn nào.
+Chào bạn! Đây là cuốn **Sổ tay hướng dẫn nhanh** giúp bạn dễ dàng làm quen và sử dụng phần mềm chấm công Superbrain mỗi ngày.
+
+Phần mềm được xây dựng theo mô hình **Nhân sự tự chấm công (Employee Self-Service)**:
+- **Chủ động & Minh bạch**: Mỗi cán bộ nhân viên, giáo viên hay nhân sự thử việc đều là người chủ động ghi nhận ngày giờ công của mình qua máy tính văn phòng hoặc điện thoại cá nhân chính chủ.
+- **Tự quản lý quyền lợi**: Bạn có toàn quyền theo dõi lịch sử đi làm mỗi ngày, kiểm tra tổng số ngày công đã tích lũy, số ngày phép năm còn lại và chủ động gửi đơn giải trình nếu có sai sót, không còn phải chờ đợi đến cuối tháng để nhờ phòng Nhân sự kiểm tra hộ.
+
+Tài liệu này được viết theo phong cách gần gũi, đơn giản, từng bước rõ ràng để bất kỳ ai cũng có thể thực hiện được ngay từ lần đầu tiên.
 
 ---
 
@@ -20,8 +25,12 @@ Tài liệu này được viết theo phong cách gần gũi, đơn giản, từ
 5. [Bước 5: Xin nghỉ phép và Giải trình khi quên quẹt thẻ](#5-bước-5-xin-nghỉ-phép-và-giải-trình-khi-quên-quẹt-thẻ)
    - 5.1. [Cách tạo đơn xin nghỉ phép](#51-cách-tạo-đơn-xin-nghỉ-phép)
    - 5.2. [Cách tạo đơn giải trình (khi quên bấm giờ hoặc đi công tác)](#52-cách-tạo-đơn-giải-trình-khi-quên-bấm-giờ-hoặc-đi-công-tác)
-6. [Bước 6: Xem thông báo phản hồi từ Sếp và Nhân sự](#6-bước-6-xem-thông-báo-phản-hồi-từ-sếp-và-nhân-sự)
-7. [5 Điều bạn cần đặc biệt lưu ý để không bị mất công](#7-5-điều-bạn-cần-đặc-biệt-lưu-ý-để-không-bị-mất-công)
+6. [Bước 6: Dành cho Nhân sự Thử Việc & Bán Thời Gian: Đăng ký Lịch Làm Việc](#6-bước-6-dành-cho-nhân-sự-thử-việc--bán-thời-gian-đăng-ký-lịch-làm-việc)
+   - 6.1. [Ai cần sử dụng tính năng này?](#61-ai-cần-sử-dụng-tính-năng-này)
+   - 6.2. [Các bước đăng ký lịch làm việc trên giao diện lịch tháng](#62-các-bước-đăng-ký-lịch-làm-việc-trên-giao-diện-lịch-tháng)
+   - 6.3. [3 Quy tắc vàng nhân sự thử việc bắt buộc phải nhớ](#63-3-quy-tắc-vàng-nhân-sự-thử-việc-bắt-buộc-phải-nhớ)
+7. [Bước 7: Xem thông báo phản hồi từ Sếp và Nhân sự](#7-bước-7-xem-thông-báo-phản-hồi-từ-sếp-và-nhân-sự)
+8. [Những điều bạn cần đặc biệt lưu ý để không bị mất công](#8-những-điều-bạn-cần-đặc-biệt-lưu-ý-để-không-bị-mất-công)
 
 ---
 
@@ -37,7 +46,7 @@ Tài liệu này được viết theo phong cách gần gũi, đơn giản, từ
 6. Nhấn nút xanh: **"Đăng nhập vào hệ thống"**.
 
 > [!TIP]
-> **Giữ nguyên màn hình khi Refresh (F5)**: Khi bạn đang ở bất kỳ màn hình nào (Lịch sử công, Đơn nghỉ phép, Thiết bị...), nếu bạn bấm F5 hoặc tải lại trang, hệ thống sẽ **giữ nguyên chính xác phân hệ và tab bạn đang thao tác**, không bao giờ bị nhảy về trang chủ.
+> **Giữ nguyên màn hình khi tải lại trang (F5)**: Khi bạn đang ở bất kỳ màn hình nào (Lịch sử công, Đăng ký lịch làm việc, Đơn từ...), nếu bạn bấm F5 hoặc tải lại trang, hệ thống sẽ **giữ nguyên chính xác phân hệ và tab bạn đang thao tác**, không bao giờ bị nhảy về trang chủ.
 
 ---
 
@@ -48,7 +57,7 @@ Tài liệu này được viết theo phong cách gần gũi, đơn giản, từ
 ![Màn hình Cài đặt Thiết bị](docs/images/nv_02_cai_dat_thiet_bi.png)
 
 ### Thao tác đăng ký cực kỳ đơn giản:
-1. Sau khi đăng nhập, chọn mục **"Thiết Bị & Địa Chỉ MAC"** trên thanh menu.
+1. Sau khi đăng nhập, chọn mục **"Cài đặt thiết bị"** (hoặc *Nhận Diện Máy & Điện Thoại*) trên thanh menu.
 2. **Nếu bạn đang ngồi trước Máy tính của mình**:
    - Hệ thống thông minh sẽ tự biết bạn đang dùng máy tính.
    - Nút đăng ký điện thoại sẽ được tự động khóa lại để bạn không bấm nhầm.
@@ -78,10 +87,10 @@ Dành cho các bạn ngồi làm việc cố định tại văn phòng cơ sở.
 
 ![Màn hình Chấm công PC](docs/images/nv_01_cham_cong_pc.png)
 
-- **Nguyên lý cực dễ hiểu**: Máy tính văn phòng đã được lưu địa chỉ máy của bạn. Bạn **không cần** bận tâm về Wifi hay định vị GPS.
+- **Nguyên lý cực dễ hiểu**: Máy tính văn phòng đã được lưu nhận diện máy của bạn. Bạn **không cần** bận tâm về Wifi hay định vị vị trí.
 - **Các bước làm**:
   1. Mở web chấm công trên máy tính quen thuộc của bạn.
-  2. Tại màn hình chính, bạn sẽ thấy dòng chữ xanh: **Địa chỉ MAC: Hợp lệ**.
+  2. Tại màn hình chính, bạn sẽ thấy dòng chữ xanh: **Thiết bị: Hợp lệ**.
   3. Bấm nút to màu xanh: **"CHẤM CÔNG VÀO (CHECK-IN)"** (khi đến) hoặc **"CHẤM CÔNG RA VỀ (CHECK-OUT)"** (khi về).
   4. Màn hình báo âm thanh nhẹ và thông báo màu xanh: **"Chấm công thành công!"**.
   5. Bạn nhìn xuống bảng *Nhật ký điểm danh hôm nay* ở phía dưới, thấy giờ quẹt của mình hiện lên là hoàn toàn an tâm!
@@ -124,7 +133,9 @@ Bạn có thể tự mình kiểm tra xem tháng này mình đã đi làm đủ 
 
 # 5. BƯỚC 5: XIN NGHỈ PHÉP VÀ GIẢI TRÌNH KHI QUÊN QUẸT THẺ
 
-![Quản lý đơn từ và nghỉ phép](docs/images/nv_03_don_tu_nghi_phep.png)
+![Quản lý đơn từ và nghỉ phép trên Máy tính](docs/images/nv_03_don_tu_nghi_phep.png)
+
+![Quản lý đơn từ trên Điện thoại](docs/images/nv_06_mobile_don_tu.png)
 
 ---
 
@@ -146,21 +157,71 @@ Nếu hôm nay bạn có đi làm nhưng quên bấm máy tính lúc vào, hoặ
 3. Chọn:
    - Loại: *Bổ sung giờ Vào* hoặc *Bổ sung giờ Ra*.
    - Nhập giờ bạn có mặt thực tế (Ví dụ: 08:00 sáng).
-   - Lý do: Ghi rõ ràng (Ví dụ: *Sáng nay máy tính văn phòng cập nhật Windows đến 8h45 mới vào được web*).
+   - Lý do: Ghi rõ ràng (Ví dụ: *Sáng nay máy tính văn phòng cập nhật hệ điều hành đến 8h45 mới vào được web*).
 4. Bấm **"Gửi giải trình"**. Khi Sếp duyệt, hệ thống sẽ tự động bù đủ công ngày hôm đó cho bạn mà không bị tính là đi trễ hay vắng mặt!
 
 ---
 
-# 6. BƯỚC 6: XEM THÔNG BÁO PHẢN HỒI TỪ SẾP VÀ NHÂN SỰ
+# 6. BƯỚC 6: DÀNH CHO NHÂN SỰ THỬ VIỆC & BÁN THỜI GIAN: ĐĂNG KÝ LỊCH LÀM VIỆC
+
+## 6.1. Ai cần sử dụng tính năng này?
+Tính năng **Đăng Ký Lịch Làm Việc** được kích hoạt tự động cho các nhóm nhân sự có lịch làm việc linh hoạt:
+- 🆕 **Nhân sự Thử Việc (Probationary Staff)**: Trong giai đoạn thử việc hoặc mới nhận việc, lịch làm việc của bạn được đăng ký theo kế hoạch đào tạo, hướng dẫn của Quản lý/Mentor để làm căn cứ chấm công và đánh giá chuyên cần khi kết thúc thử việc.
+- ⏱️ **Nhân sự Bán Thời Gian (Part-time)**: Giáo viên hoặc trợ giảng đăng ký ca dạy, buổi làm việc theo tuần hoặc tháng.
+- 🏠 **Nhân sự Làm Việc Tại Nhà (Remote)**: Đăng ký ngày làm việc từ xa để hệ thống ghi nhận công mà không kiểm tra vị trí văn phòng.
+
+*(Lưu ý: Nhân viên chính thức làm việc toàn thời gian Full-time cố định tại cơ sở sẽ đi làm theo ca chuẩn mặc định của công ty, không cần đăng ký từng ngày).*
+
+---
+
+## 6.2. Các bước đăng ký lịch làm việc trên giao diện lịch tháng
+Bạn có thể thao tác đăng ký lịch làm việc dễ dàng trên cả Máy tính và Điện thoại:
+
+1. **Vào phân hệ Lịch làm việc**: Nhấp vào menu **"Lịch làm việc của tôi"** (hoặc biểu tượng Lịch trên trang cá nhân).
+2. **Quan sát Lịch tháng trực quan**: Màn hình hiển thị lịch 7 cột từ Thứ Hai đến Chủ Nhật, hiển thị rõ ràng ngày làm việc, nửa ngày Thứ Bảy, ngày nghỉ tuần và các ngày lễ của công ty.
+3. **Chọn ngày cần đăng ký làm việc**:
+   - Bạn có thể nhấp chuột chọn từng ngày trực tiếp trên ô lịch.
+   - Hoặc sử dụng tính năng **"Chọn nhiều ngày cùng lúc (Batch Select)"** để chọn nhanh các ngày trong tuần hoặc cả tháng tới.
+4. **Chọn ca làm việc**:
+   - Chọn ca: **Cả ngày (Full-time)**, **Ca sáng (Morning)**, hoặc **Ca chiều (Afternoon)**.
+   - Ghi chú thêm nếu cần (Ví dụ: *Ca đào tạo giáo án mới*, *Ca dự giờ cơ sở*).
+5. **Lưu lịch đăng ký**: Nhấn nút xanh **"Đăng ký lịch làm việc"**.
+   - Màn hình sẽ thông báo: *"Đăng ký lịch làm việc thành công!"*.
+   - Các ngày đã đăng ký sẽ chuyển sang màu xanh trên lịch để bạn dễ dàng theo dõi.
+
+---
+
+## 6.3. 3 Quy tắc vàng nhân sự thử việc bắt buộc phải nhớ
+
+> [!IMPORTANT]
+> ### 3 NGUYÊN TẮC BẮT BUỘC ĐỂ KHÔNG BỊ MẤT CÔNG THỬ VIỆC
+> 
+> 1. ⚠️ **BẮT BUỘC PHẢI ĐĂNG KÝ TRƯỚC**:
+>    Bạn phải đăng ký lịch làm việc trước ngày làm thực tế (trước 24h hoặc đăng ký vào đầu tuần/đầu tháng). Hệ thống **chặn hoàn toàn việc đăng ký lùi ngày đã qua** (không thể nghỉ hoặc đi làm rồi mới quay lại đăng ký lùi ngày).
+> 
+> 2. 🛡️ **NGÀY NGOÀI LỊCH KHÔNG BỊ TÍNH VẮNG KHÔNG PHÉP**:
+>    Đối với nhân sự thử việc và bán thời gian, những ngày bạn không đăng ký lịch làm việc sẽ được xem là ngày nghỉ tự nhiên ngoài lịch. Bạn **hoàn toàn không cần làm đơn giải trình và không bị tính là vắng mặt không phép (KP)**, giúp bảo toàn điểm chuyên cần của bạn.
+> 
+> 3. 💡 **TÍNH CÔNG THỬ VIỆC CHUẨN XÁC THEO NGÀY LÀM THỰC TẾ**:
+>    Hệ thống sẽ đối chiếu ngày đi làm thực tế với lịch đã đăng ký để tính đủ ngày công thử việc cho bạn. Đặc biệt, nếu bạn đăng ký 8 ngày nhưng được Quản lý phân công và thực tế đi làm 9 hoặc 10 ngày, hệ thống **vẫn ghi nhận và tính đủ 9 hoặc 10 ngày công thực tế** cho bạn!
+
+### Cách xem lại hoặc hủy lịch đã đăng ký:
+- Nếu muốn xem lại: Nhấp chuột vào ngày màu xanh trên ô lịch để xem ca làm và ghi chú.
+- Nếu muốn hủy lịch: Khi kế hoạch thay đổi (trước ngày làm việc), bạn nhấp vào ngày đó và bấm nút **"Hủy lịch làm việc"** để chọn lại ngày khác.
+
+---
+
+# 7. BƯỚC 7: XEM THÔNG BÁO PHẢN HỒI TỪ SẾP VÀ NHÂN SỰ
 
 Ngay trên góc phải màn hình, cạnh tên của bạn có một biểu tượng **Hình Quả Chuông 🔔**:
 - Khi đơn nghỉ phép của bạn được Sếp duyệt: Chuông sẽ báo chấm đỏ kèm lời nhắn *"Đơn nghỉ phép ngày XX/XX đã được phê duyệt"*.
+- Khi đơn giải trình bổ sung công được Sếp duyệt: Chuông sẽ báo tin nhắn xác nhận.
 - Nếu đơn bị từ chối: Chuông sẽ báo lý do từ chối để bạn biết đường trao đổi lại với Sếp.
 - Bạn chỉ cần nhấp vào Chuông là đọc được toàn bộ tin nhắn mới nhất.
 
 ---
 
-# 7. 5 ĐIỀU BẠN CẦN ĐẶC BIỆT LƯU Ý ĐỂ KHÔNG BỊ MẤT CÔNG
+# 8. NHỮNG ĐIỀU BẠN CẦN ĐẶC BIỆT LƯU Ý ĐỂ KHÔNG BỊ MẤT CÔNG
 
 > [!IMPORTANT]
 > 1. **MÁY NÀO NGƯỜI ĐÓ DÙNG**: Không bao giờ đăng nhập tài khoản của mình trên máy của người khác để quẹt hộ, vì hệ thống chỉ nhận diện máy tính đã đăng ký chính chủ.
@@ -168,6 +229,7 @@ Ngay trên góc phải màn hình, cạnh tên của bạn có một biểu tư�
 > 3. **QUÊN QUẸT THẺ HÃY LÀM ĐƠN NGAY TRONG NGÀY**: Nếu lỡ quên quẹt, hãy tạo ngay đơn giải trình trong ngày hôm đó để Sếp duyệt sớm, tránh để dồn sang tháng sau sẽ khó đối soát.
 > 4. **XIN PHÉP TRƯỚC KHI NGHỈ**: Nên nộp đơn xin nghỉ phép trước ít nhất 1-2 ngày để Sếp kịp sắp xếp người thay thế và duyệt phép đúng hạn.
 > 5. **KHI ĐỔI MÁY MỚI**: Nếu bạn vừa mua laptop mới hoặc đổi điện thoại, hãy nhắn ngay cho bộ phận Nhân sự / IT để được hỗ trợ "Hủy máy cũ" và cho phép bạn đăng ký máy mới trong 30 giây!
+> 6. **NHÂN SỰ THỬ VIỆC ĐĂNG KÝ LỊCH ĐÚNG HẠN**: Luôn đăng ký lịch làm việc trước ngày làm để đảm bảo đủ công và làm căn cứ đánh giá ký hợp đồng chính thức thuận lợi.
 
 ---
 *(Chúc bạn có những ngày làm việc hiệu quả và nhiều niềm vui tại Superbrain!)*

@@ -183,11 +183,32 @@ public static class DbSeeder
                   JOIN dbo.Employees e ON d.EmployeeCode = e.EmployeeCode
                   WHERE d.CompanyId IS NULL",
 
-                @"IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot')
+                @"IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot' AND object_id = OBJECT_ID('dbo.tbl_EmployeeDevices'))
                       DROP INDEX UX_Dev_ActiveSlot ON dbo.tbl_EmployeeDevices",
 
-                @"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot')
-                      CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_ActiveSlot ON dbo.tbl_EmployeeDevices(CompanyId, EmployeeCode, DeviceType) WHERE IsActiveSlot = 1",
+                @"SET QUOTED_IDENTIFIER ON; SET ANSI_NULLS ON;
+                  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot_PC' AND object_id = OBJECT_ID('dbo.tbl_EmployeeDevices'))
+                      CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_ActiveSlot_PC ON dbo.tbl_EmployeeDevices(CompanyId, EmployeeCode) WHERE IsActiveSlot = 1 AND DeviceType = 'PC'",
+
+                @"SET QUOTED_IDENTIFIER ON; SET ANSI_NULLS ON;
+                  IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_Active_Emp_Fp' AND object_id = OBJECT_ID('dbo.tbl_EmployeeDevices'))
+                      CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_Active_Emp_Fp ON dbo.tbl_EmployeeDevices(CompanyId, EmployeeCode, FingerprintHash) WHERE FingerprintHash IS NOT NULL AND IsActiveSlot = 1",
+
+                @"IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UQ_EmployeeDevices_ActiveMac')
+                  BEGIN
+                      IF NOT EXISTS (
+                          SELECT 1 FROM sys.index_columns ic
+                          JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                          JOIN sys.indexes i ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+                          WHERE i.name = N'UQ_EmployeeDevices_ActiveMac' AND c.name = 'CompanyId'
+                      )
+                      BEGIN
+                          DROP INDEX UQ_EmployeeDevices_ActiveMac ON dbo.tbl_EmployeeDevices;
+                      END
+                  END",
+
+                @"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UQ_EmployeeDevices_ActiveMac')
+                      CREATE UNIQUE NONCLUSTERED INDEX UQ_EmployeeDevices_ActiveMac ON dbo.tbl_EmployeeDevices(CompanyId, FingerprintHash) WHERE FingerprintHash IS NOT NULL AND IsActiveSlot = 1 AND DeviceType = 'PC'",
 
                 @"IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_DailyPunchSummary' AND COLUMN_NAME = 'CompanyId')
                   BEGIN
@@ -251,7 +272,66 @@ public static class DbSeeder
                   WHERE l.CompanyId IS NULL",
 
                 @"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Log_Comp_Emp_Date')
-                      CREATE NONCLUSTERED INDEX IX_Log_Comp_Emp_Date ON dbo.tbl_WebAttendanceLogs(CompanyId, EmployeeCode, WorkDate, CheckTimeUtc)"
+                      CREATE NONCLUSTERED INDEX IX_Log_Comp_Emp_Date ON dbo.tbl_WebAttendanceLogs(CompanyId, EmployeeCode, WorkDate, CheckTimeUtc)",
+
+                @"IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_Notifications' AND COLUMN_NAME = 'CompanyId')
+                  BEGIN
+                      ALTER TABLE dbo.tbl_Notifications ADD CompanyId INT NULL CONSTRAINT FK_tbl_Notifications_CompanyId FOREIGN KEY REFERENCES dbo.Companies(Id);
+                  END",
+
+                @"IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tbl_Notifications' AND COLUMN_NAME = 'BranchCode')
+                  BEGIN
+                      ALTER TABLE dbo.tbl_Notifications ADD BranchCode NVARCHAR(50) NULL;
+                  END",
+
+                @"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Noti_User_Company')
+                      CREATE NONCLUSTERED INDEX IX_Noti_User_Company ON dbo.tbl_Notifications(UserID, CompanyId, IsRead, CreatedAtUtc)",
+
+                @"IF OBJECT_ID(N'dbo.Employees', N'U') IS NOT NULL
+                  BEGIN
+                      IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'Employees' AND COLUMN_NAME = N'EmployeeType')
+                          ALTER TABLE dbo.Employees ADD EmployeeType NVARCHAR(20) NOT NULL CONSTRAINT DF_Employees_EmployeeType DEFAULT (N'STANDARD');
+                  END",
+
+                @"IF OBJECT_ID(N'dbo.tbl_WorkSchedules', N'U') IS NULL
+                  BEGIN
+                      CREATE TABLE dbo.tbl_WorkSchedules (
+                          ScheduleId INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_tbl_WorkSchedules PRIMARY KEY,
+                          CompanyId INT NOT NULL,
+                          EmployeeId INT NULL,
+                          EmployeeCode NVARCHAR(30) NOT NULL,
+                          WorkDate DATE NOT NULL,
+                          ShiftCode NVARCHAR(20) NOT NULL CONSTRAINT DF_tbl_WorkSchedules_Shift DEFAULT (N'FULL'),
+                          Note NVARCHAR(250) NULL,
+                          Status NVARCHAR(20) NOT NULL CONSTRAINT DF_tbl_WorkSchedules_Status DEFAULT (N'REGISTERED'),
+                          RegisteredAtUtc DATETIME NOT NULL CONSTRAINT DF_tbl_WorkSchedules_RegAt DEFAULT (GETDATE()),
+                          RegisteredBy NVARCHAR(50) NULL,
+                          CONSTRAINT UQ_tbl_WorkSchedules_EmpDate UNIQUE (CompanyId, EmployeeCode, WorkDate)
+                      );
+                      CREATE NONCLUSTERED INDEX IX_tbl_WorkSchedules_CompDate ON dbo.tbl_WorkSchedules (CompanyId, WorkDate, EmployeeCode);
+                  END",
+
+                @"IF OBJECT_ID(N'dbo.AttendanceCodes', N'U') IS NOT NULL
+                  BEGIN
+                      INSERT INTO dbo.AttendanceCodes (CompanyId, Code, Name, WorkValue, HolidayValue, AnnualLeaveValue, PaidLeaveValue, FundType, FundDeduct, IsHalfLeave, Color, SortOrder, IsSystem, Condition)
+                      SELECT c.Id, N'KL', N'Nghỉ không hưởng lương', 0, 0, 0, 0, 0, 0, 0, N'E2EFDA', 13, 1, N'Đã hết phép năm hoặc nghỉ việc riêng không hưởng lương; có đơn xin phép được duyệt'
+                      FROM dbo.Companies c
+                      WHERE NOT EXISTS (SELECT 1 FROM dbo.AttendanceCodes a WHERE a.CompanyId = c.Id AND a.Code = N'KL');
+                  END",
+
+                @"IF OBJECT_ID(N'dbo.tbl_HrAlerts', N'U') IS NULL
+                  BEGIN
+                      CREATE TABLE dbo.tbl_HrAlerts (
+                          AlertId INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                          AlertType VARCHAR(30) NOT NULL,
+                          BranchCode NVARCHAR(50) NULL,
+                          Detail NVARCHAR(500) NOT NULL,
+                          Status VARCHAR(20) NOT NULL CONSTRAINT DF_tbl_HrAlerts_Status DEFAULT ('OPEN'),
+                          AckedByUserId INT NULL,
+                          AckedAtUtc DATETIME2(0) NULL,
+                          CreatedAtUtc DATETIME2(0) NOT NULL CONSTRAINT DF_tbl_HrAlerts_Created DEFAULT (SYSUTCDATETIME())
+                      );
+                  END"
             };
 
             foreach (var sql in multiBranchMigrationSqls)
@@ -260,7 +340,7 @@ public static class DbSeeder
                 cmd.CommandText = sql;
                 await cmd.ExecuteNonQueryAsync();
             }
-            logger.LogInformation("✅ [Auto-Migration] Đã đồng bộ hỗ trợ trùng mã nhân viên khác hội sở thành công!");
+            logger.LogInformation("✅ [Auto-Migration] Đã đồng bộ hỗ trợ trùng mã nhân viên khác hội sở, EmployeeType, WorkSchedules & KL thành công!");
         }
         catch (Exception ex)
         {
@@ -375,6 +455,7 @@ public static class DbSeeder
             {
                 Username = "hr",
                 FullName = "Chuyên viên Nhân sự HCNS",
+                EmployeeCode = "HR01",
                 PasswordHash = passwordService.HashPassword("Hr@123456"),
                 Role = Roles.HR,
                 IsActive = true,
@@ -387,6 +468,45 @@ public static class DbSeeder
             db.UserCompanies.Add(new UserCompany { UserId = hrUser.Id, CompanyId = defaultCompany.Id });
             await db.SaveChangesAsync();
             logger.LogInformation("Đã khởi tạo tài khoản HCNS: hr / Hr@123456");
+        }
+        else if (string.IsNullOrWhiteSpace(hrUser.EmployeeCode))
+        {
+            hrUser.EmployeeCode = "HR01";
+            await db.SaveChangesAsync();
+        }
+
+        // Đảm bảo hồ sơ nhân viên cho HR01 tồn tại để có thể tự chấm công
+        var hrEmp = await db.Employees.FirstOrDefaultAsync(e => e.EmployeeCode == "HR01" && e.CompanyId == defaultCompany.Id);
+        if (hrEmp == null)
+        {
+            var standardGroup = await db.EmployeeGroups.FirstOrDefaultAsync(g => g.CompanyId == defaultCompany.Id && g.IsDefault);
+            hrEmp = new Employee
+            {
+                CompanyId = defaultCompany.Id,
+                EmployeeCode = "HR01",
+                FullName = hrUser.FullName ?? "Chuyên viên Nhân sự HCNS",
+                GroupId = standardGroup != null ? standardGroup.Id : 0,
+                StartDate = new DateTime(2025, 1, 1),
+                AttendanceSource = "APP",
+                EmployeeType = "STANDARD"
+            };
+            db.Employees.Add(hrEmp);
+            await db.SaveChangesAsync();
+            logger.LogInformation("Đã khởi tạo hồ sơ nhân viên mẫu cho HCNS: HR01");
+        }
+
+        var hrAssign = await db.EmployeeBranchAssignments.FirstOrDefaultAsync(a => a.EmployeeCode == "HR01" && a.BranchCode == defaultCompany.Code);
+        if (hrAssign == null)
+        {
+            db.EmployeeBranchAssignments.Add(new EmployeeBranchAssignment
+            {
+                CompanyId = defaultCompany.Id,
+                EmployeeCode = "HR01",
+                BranchCode = defaultCompany.Code,
+                IsPrimary = true,
+                FromDate = new DateTime(2025, 1, 1)
+            });
+            await db.SaveChangesAsync();
         }
 
         // 5. Seed Nhân viên mẫu NV01 và tài khoản ESS (nv01 / Nv@123456)
@@ -541,7 +661,7 @@ public static class DbSeeder
             }
         }
 
-        // 2. Tạo 14 mã ký hiệu chuẩn cho hội sở
+        // 2. Tạo hoặc đồng bộ các mã ký hiệu chuẩn cho hội sở
         if (!await db.AttendanceCodes.AnyAsync(c => c.CompanyId == companyId))
         {
             var defaults = Codes.Defaults();
@@ -563,6 +683,49 @@ public static class DbSeeder
                     SortOrder = def.SortOrder,
                     IsSystem = def.IsSystem,
                     Condition = def.Condition
+                });
+            }
+        }
+        else
+        {
+            // Tự động nâng cấp mã cũ: V -> KP, xóa NL, 1/2P -> P/2
+            var oldV = await db.AttendanceCodes.FirstOrDefaultAsync(c => c.CompanyId == companyId && c.Code == "V");
+            if (oldV != null)
+            {
+                oldV.Code = Codes.Vacant;
+                oldV.Name = "Không Phép (KP)";
+            }
+            var oldNl = await db.AttendanceCodes.FirstOrDefaultAsync(c => c.CompanyId == companyId && c.Code == "NL");
+            if (oldNl != null)
+            {
+                db.AttendanceCodes.Remove(oldNl);
+            }
+            var oldHalf = await db.AttendanceCodes.FirstOrDefaultAsync(c => c.CompanyId == companyId && c.Code == "1/2P");
+            if (oldHalf != null)
+            {
+                oldHalf.Code = "P/2";
+                oldHalf.Name = "Nghỉ phép năm 1/2 ngày";
+            }
+
+            var klCode = await db.AttendanceCodes.FirstOrDefaultAsync(c => c.CompanyId == companyId && c.Code == "KL");
+            if (klCode == null)
+            {
+                db.AttendanceCodes.Add(new AttendanceCode
+                {
+                    CompanyId = companyId,
+                    Code = Codes.UnpaidLeave,
+                    Name = "Nghỉ không hưởng lương",
+                    WorkValue = 0,
+                    HolidayValue = 0,
+                    AnnualLeaveValue = 0,
+                    PaidLeaveValue = 0,
+                    FundType = 0,
+                    FundDeduct = 0,
+                    IsHalfLeave = false,
+                    Color = "E2EFDA",
+                    SortOrder = 13,
+                    IsSystem = true,
+                    Condition = "Đã hết phép năm hoặc nghỉ việc riêng không hưởng lương; có đơn xin phép được duyệt"
                 });
             }
         }

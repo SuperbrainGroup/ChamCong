@@ -17,6 +17,10 @@ import type {
   PublishedTimesheetData,
   EmployeeDevice
 } from '../../types';
+import { convertMultipleImagesToWebP } from '../../utils/imageToWebp';
+import { DateInput } from '../../components/DateInput';
+import { PersonalTimesheetView } from './PersonalTimesheetView';
+import { EmployeeScheduleView } from './EmployeeScheduleView';
 import {
   Clock,
   MapPin,
@@ -42,11 +46,15 @@ import {
   HelpCircle,
   ChevronRight,
   Info,
-  Lock
+  Lock,
+  Paperclip,
+  Eye,
+  Trash2,
+  Edit2
 } from 'lucide-react';
 
 interface PcCheckinViewProps {
-  initialTab?: 'checkin' | 'history' | 'requests' | 'device';
+  initialTab?: 'checkin' | 'schedule' | 'history' | 'requests' | 'device';
   onSwitchToMobile?: () => void;
   onNavigate?: (view: string) => void;
 }
@@ -60,7 +68,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
   const { addToast } = useToast();
   const { settings } = usePlatform();
 
-  const [activeTab, setActiveTab] = useState<'checkin' | 'history' | 'requests' | 'device'>(initialTab);
+  const [activeTab, setActiveTab] = useState<'checkin' | 'schedule' | 'history' | 'requests' | 'device'>(initialTab);
   const [loading, setLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -84,7 +92,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
       try {
         const state = await attendanceApi.getState();
         setPunchState(state);
-      } catch {}
+      } catch { }
     }, 20000);
     return () => clearInterval(interval);
   }, [punchState?.hasValidCheckin, punchState?.canCheckout, punchState?.currentMode]);
@@ -105,6 +113,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
   const [attendanceHistory, setAttendanceHistory] = useState<any[]>([]);
   const [leaveBalance, setLeaveBalance] = useState<LeaveBalanceSummary | null>(null);
   const [publishedTimesheet, setPublishedTimesheet] = useState<PublishedTimesheetData | null>(null);
+  const [historyMode, setHistoryMode] = useState<'TIMESHEET' | 'RAW_LOGS'>('TIMESHEET');
 
   // Đơn từ & Giải trình
   const [myRequests, setMyRequests] = useState<UserRequestItem[]>([]);
@@ -123,6 +132,36 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
   const [regulReasonCode, setRegulReasonCode] = useState('Quên bấm');
   const [regulReason, setRegulReason] = useState('');
   const [regulFiles, setRegulFiles] = useState<File[]>([]);
+
+  // State Chỉnh sửa đơn
+  const [editingRequest, setEditingRequest] = useState<UserRequestItem | null>(null);
+  const [editRequestType, setEditRequestType] = useState<'LEAVE' | 'REGULARIZATION'>('LEAVE');
+  const [editLeaveCode, setEditLeaveCode] = useState('P');
+  const [editFromDate, setEditFromDate] = useState('');
+  const [editToDate, setEditToDate] = useState('');
+  const [editDayPart, setEditDayPart] = useState<'FULL' | 'MORNING' | 'AFTERNOON'>('FULL');
+  const [editInTime, setEditInTime] = useState('08:00');
+  const [editOutTime, setEditOutTime] = useState('17:00');
+  const [editReasonCode, setEditReasonCode] = useState('Quên bấm');
+  const [editReason, setEditReason] = useState('');
+  const [editNewFiles, setEditNewFiles] = useState<File[]>([]);
+  const [submittingEdit, setSubmittingEdit] = useState(false);
+
+  // State Xem tệp minh chứng
+  const [viewingAttachmentReq, setViewingAttachmentReq] = useState<UserRequestItem | null>(null);
+  const [previewAttachmentId, setPreviewAttachmentId] = useState<number | null>(null);
+
+  const handleOpenAttachments = async (req: UserRequestItem) => {
+    setViewingAttachmentReq(req);
+    try {
+      const detail = await requestsApi.getById(req.requestId);
+      if (detail) {
+        setViewingAttachmentReq(detail);
+      }
+    } catch (err) {
+      console.error('Lỗi khi nạp chi tiết đơn:', err);
+    }
+  };
 
   // 1. Đồng hồ thời gian thực
   useEffect(() => {
@@ -329,6 +368,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
     if (!isMacRegistered) {
       addToast('Tài khoản của bạn chưa đăng ký MAC Address cho máy tính. Vui lòng vào tab "Thiết Bị & Địa Chỉ MAC" và bấm "Đăng ký MAC Address" trước khi chấm công!', 'error');
       setActiveTab('device');
+      if (onNavigate) onNavigate('ess-devices');
       return;
     }
 
@@ -386,17 +426,23 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
   };
 
   // Nộp đơn nghỉ phép
+  const [submittingLeave, setSubmittingLeave] = useState(false);
   const handleSubmitLeave = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSubmittingLeave(true);
     try {
+      // Tự động chuyển đổi ảnh minh chứng sang WebP trước khi gửi lên máy chủ
+      const converted = await convertMultipleImagesToWebP(leaveFiles, 0.82);
+      const webpFiles = converted.map(c => c.file);
+
       const formData = new FormData();
       formData.append('requestType', 'LEAVE');
-      formData.append('leaveCode', leaveCode);
+      formData.append('leaveCode', leaveCode === '1/2P' ? 'P/2' : leaveCode);
       formData.append('fromDate', leaveFromDate);
       formData.append('toDate', leaveToDate);
       formData.append('dayPart', leaveDayPart);
       formData.append('reason', leaveReason);
-      leaveFiles.forEach(file => formData.append('files', file));
+      webpFiles.forEach(file => formData.append('files', file));
 
       await requestsApi.submit(formData);
       addToast('Gửi đơn nghỉ phép thành công. Đang chờ HCNS phê duyệt.', 'success');
@@ -408,13 +454,21 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
       window.dispatchEvent(new CustomEvent('notification-updated'));
     } catch (err: any) {
       addToast(err.response?.data?.message || 'Có lỗi khi gửi đơn.', 'error');
+    } finally {
+      setSubmittingLeave(false);
     }
   };
 
   // Nộp giải trình chấm công
+  const [submittingRegul, setSubmittingRegul] = useState(false);
   const handleSubmitRegularization = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSubmittingRegul(true);
     try {
+      // Tự động chuyển đổi ảnh minh chứng sang WebP trước khi gửi lên máy chủ
+      const converted = await convertMultipleImagesToWebP(regulFiles, 0.82);
+      const webpFiles = converted.map(c => c.file);
+
       const formData = new FormData();
       formData.append('requestType', 'REGULARIZATION');
       formData.append('fromDate', regulDate);
@@ -423,7 +477,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
       formData.append('actualOut', regulOutTime);
       formData.append('reasonCode', regulReasonCode);
       formData.append('reason', regulReason);
-      regulFiles.forEach(file => formData.append('files', file));
+      webpFiles.forEach(file => formData.append('files', file));
 
       await requestsApi.submit(formData);
       addToast('Gửi giải trình chấm công thành công. Đang chờ HCNS xem xét.', 'success');
@@ -435,15 +489,113 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
       window.dispatchEvent(new CustomEvent('notification-updated'));
     } catch (err: any) {
       addToast(err.response?.data?.message || 'Có lỗi khi gửi giải trình.', 'error');
+    } finally {
+      setSubmittingRegul(false);
+    }
+  };
+
+  // Mở modal chỉnh sửa đơn
+  const handleOpenEditRequest = (req: UserRequestItem) => {
+    setEditingRequest(req);
+    setEditRequestType(req.requestType);
+    setEditFromDate(req.fromDate);
+    setEditToDate(req.toDate || req.fromDate);
+    setEditReason(req.reason || '');
+    setEditNewFiles([]);
+
+    if (req.requestType === 'LEAVE') {
+      setEditLeaveCode(req.leaveCode || 'P');
+      setEditDayPart((req.dayPart as any) || 'FULL');
+    } else {
+      setEditInTime(req.actualTimeIn || '08:00');
+      setEditOutTime(req.actualTimeOut || '17:00');
+      setEditReasonCode(req.reasonCode || 'Quên bấm');
+    }
+  };
+
+  // Lưu cập nhật đơn
+  const handleSaveEditRequest = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingRequest) return;
+    setSubmittingEdit(true);
+
+    try {
+      const converted = await convertMultipleImagesToWebP(editNewFiles, 0.82);
+      const webpFiles = converted.map(c => c.file);
+
+      const formData = new FormData();
+      formData.append('requestType', editRequestType);
+      formData.append('fromDate', editFromDate);
+      formData.append('reason', editReason);
+
+      if (editRequestType === 'LEAVE') {
+        formData.append('toDate', editToDate);
+        formData.append('leaveCode', editLeaveCode === '1/2P' ? 'P/2' : editLeaveCode);
+        formData.append('dayPart', editDayPart);
+      } else {
+        formData.append('toDate', editFromDate);
+        formData.append('actualIn', editInTime);
+        formData.append('actualOut', editOutTime);
+        formData.append('reasonCode', editReasonCode);
+      }
+
+      webpFiles.forEach(f => formData.append('files', f));
+
+      await requestsApi.update(editingRequest.requestId, formData);
+      addToast('Cập nhật đơn thành công!', 'success');
+      setEditingRequest(null);
+      setEditNewFiles([]);
+
+      const updatedList = await requestsApi.getMyRequests();
+      setMyRequests(updatedList);
+      window.dispatchEvent(new CustomEvent('notification-updated'));
+    } catch (err: any) {
+      addToast(err.response?.data?.message || 'Có lỗi khi cập nhật đơn.', 'error');
+    } finally {
+      setSubmittingEdit(false);
+    }
+  };
+
+  // Xóa tệp minh chứng khi đang chỉnh sửa đơn
+  const handleDeleteExistingAttachment = async (attachmentId: number) => {
+    if (!confirm('Bạn có chắc muốn xóa tệp minh chứng này?')) return;
+    try {
+      await requestsApi.deleteAttachment(attachmentId);
+      addToast('Đã xóa tệp minh chứng.', 'success');
+      if (editingRequest) {
+        setEditingRequest(prev => prev ? {
+          ...prev,
+          attachments: prev.attachments?.filter(a => a.attachmentId !== attachmentId),
+          attachmentCount: Math.max(0, (prev.attachmentCount || 1) - 1)
+        } : null);
+      }
+      const updatedList = await requestsApi.getMyRequests();
+      setMyRequests(updatedList);
+    } catch (err: any) {
+      addToast(err.response?.data?.message || 'Lỗi khi xóa tệp minh chứng.', 'error');
+    }
+  };
+
+  // Hủy đơn
+  const handleCancelRequest = async (requestId: number) => {
+    if (!confirm('Bạn có chắc chắn muốn hủy đơn này?')) return;
+    try {
+      await requestsApi.cancel(requestId);
+      addToast('Đã hủy đơn thành công.', 'success');
+      const list = await requestsApi.getMyRequests();
+      setMyRequests(list);
+      window.dispatchEvent(new CustomEvent('notification-updated'));
+    } catch (err: any) {
+      addToast(err.response?.data?.message || 'Lỗi khi hủy đơn.', 'error');
     }
   };
 
   // Tính trạng thái chấm công (mỗi ngày 1 lần Check-in, 1 lần Check-out)
-  const isCompleted = punchState?.currentMode === 'COMPLETED' || (punchState?.todayPunchCount !== undefined && punchState.todayPunchCount >= 2);
+  const isCompleted = punchState?.currentMode === 'COMPLETED' || (!!punchState?.firstPunchTime && !!punchState?.lastPunchTime);
   const isNeedExplanation = punchState?.currentMode === 'NEED_EXPLANATION' && !isCompleted;
   const isWorkingNotCheckedIn = punchState?.currentMode === 'WORKING_NOT_CHECKED_IN' && !isCompleted;
-  const isWorking = (punchState?.currentMode === 'CHECKED_IN' || punchState?.currentMode === 'WORKING') && !isCompleted;
-  const isCheckout = punchState?.currentMode === 'CHECK_OUT' && !isCompleted;
+  const isCheckout = (punchState?.currentMode === 'CHECK_OUT' || (!!punchState?.canCheckout && !!punchState?.hasValidCheckin)) && !isCompleted && !isNeedExplanation;
+  const isWorking = (punchState?.currentMode === 'CHECKED_IN' || (!punchState?.canCheckout && !!punchState?.hasValidCheckin)) && !isCompleted && !isNeedExplanation && !isCheckout;
 
   return (
     <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -491,100 +643,106 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
         </div>
       )}
 
-      {/* 2. THẺ TỔNG QUAN & ĐỒNG HỒ THỜI GIAN THỰC (4 STAT CARDS) */}
-      <div style={{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
-        gap: '16px'
-      }}>
-        {/* Card 1: Đồng hồ & Ngày hiện tại */}
-        <div style={{
-          backgroundColor: '#FFFFFF',
-          border: '1px solid #E2E8F0',
-          borderRadius: '12px',
-          padding: '16px 20px',
-          boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
-        }}>
-          <div style={{ fontSize: '12px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: 0.5 }}>
-            {currentTime.toLocaleDateString('vi-VN', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' })}
-          </div>
-          <div style={{ fontSize: '28px', fontWeight: 800, color: '#0056B3', marginTop: '4px' }}>
-            {currentTime.toLocaleTimeString('vi-VN')}
-          </div>
-          <div style={{ fontSize: '12px', color: '#16A34A', display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
-            <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#16A34A', display: 'inline-block' }} />
-            Hệ thống chấm công trực tuyến
-          </div>
-        </div>
-
-        {/* Card 2: Trạng thái ca làm việc */}
-        <div style={{
-          backgroundColor: '#FFFFFF',
-          border: '1px solid #E2E8F0',
-          borderRadius: '12px',
-          padding: '16px 20px',
-          boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
-        }}>
-          <div style={{ fontSize: '12px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: 0.5 }}>
-            Trạng thái hôm nay
-          </div>
-          <div style={{
-            fontSize: '18px',
-            fontWeight: 800,
-            marginTop: '6px',
-            color: isCompleted ? '#16A34A' : isWorking ? '#0056B3' : isCheckout ? '#16A34A' : isNeedExplanation ? '#DC2626' : '#D97706'
-          }}>
-            {isCompleted ? '✅ Đã hoàn thành ca' : isWorking ? '⚡ Đang trong ca làm' : isCheckout ? '🕒 Chuẩn bị tan ca & Checkout' : isNeedExplanation ? '⚠️ Chưa Check-in (Cần giải trình)' : isWorkingNotCheckedIn ? '⚠️ Đang trong ca (Chưa Check-in)' : '🕒 Chưa bấm Check-in'}
-          </div>
-          <div style={{ fontSize: '12px', color: '#64748B', marginTop: '6px' }}>
-            {punchState?.firstPunchTime ? `Vào: ${punchState.firstPunchTime}` : (punchState?.shift ? `Ca: ${punchState.shift.shiftStart} – ${punchState.shift.shiftEnd}` : 'Chưa có giờ vào')}
-            {punchState?.lastPunchTime ? ` · Ra: ${punchState.lastPunchTime}` : ''}
-          </div>
-        </div>
-
-        {/* Card 3: Số lượt bấm trong ngày */}
-        <div style={{
-          backgroundColor: '#FFFFFF',
-          border: '1px solid #E2E8F0',
-          borderRadius: '12px',
-          padding: '16px 20px',
-          boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
-        }}>
-          <div style={{ fontSize: '12px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: 0.5 }}>
-            Lượt điểm danh hôm nay
-          </div>
-          <div style={{ fontSize: '28px', fontWeight: 800, color: '#0F172A', marginTop: '4px' }}>
-            {punchState?.todayPunchCount || 0} / 2 <span style={{ fontSize: '14px', fontWeight: 600, color: '#64748B' }}>lượt</span>
-          </div>
-          <div style={{ fontSize: '12px', color: '#64748B', marginTop: '4px' }}>
-            Quy định: 1 lượt Check-in & 1 lượt Check-out
-          </div>
-        </div>
-
-        {/* Card 4: Quỹ phép năm */}
-        <div style={{
-          backgroundColor: '#FFFFFF',
-          border: '1px solid #E2E8F0',
-          borderRadius: '12px',
-          padding: '16px 20px',
-          boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
-        }}>
-          <div style={{ fontSize: '12px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: 0.5 }}>
-            Quỹ phép năm còn lại
-          </div>
-          <div style={{ fontSize: '28px', fontWeight: 800, color: '#0F766E', marginTop: '4px' }}>
-            {leaveBalance?.available ?? 0} <span style={{ fontSize: '14px', fontWeight: 600, color: '#64748B' }}>ngày</span>
-          </div>
-          <div style={{ fontSize: '12px', color: '#64748B', marginTop: '4px' }}>
-            Đã dùng: {leaveBalance?.used ?? 0} ngày · Tồn năm trước: {leaveBalance?.carryOpening ?? 0}
-          </div>
-        </div>
-      </div>
+      {/* TAB MỚI: ĐĂNG KÝ CHỖ LÀM & LỊCH LÀM VIỆC DẠNG CALENDAR GRID */}
+      {activeTab === 'schedule' && (
+        <EmployeeScheduleView />
+      )}
 
       {/* TAB 1: ĐIỂM DANH CHECK-IN / CHECK-OUT TRÊN PC                  */}
       {/* ============================================================== */}
       {activeTab === 'checkin' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+          {/* 2. THẺ TỔNG QUAN & ĐỒNG HỒ THỜI GIAN THỰC (4 STAT CARDS) */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+            gap: '16px'
+          }}>
+            {/* Card 1: Đồng hồ & Ngày hiện tại */}
+            <div style={{
+              backgroundColor: '#FFFFFF',
+              border: '1px solid #E2E8F0',
+              borderRadius: '12px',
+              padding: '16px 20px',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
+            }}>
+              <div style={{ fontSize: '12px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                {currentTime.toLocaleDateString('vi-VN', { weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric' })}
+              </div>
+              <div style={{ fontSize: '28px', fontWeight: 800, color: '#0056B3', marginTop: '4px' }}>
+                {currentTime.toLocaleTimeString('vi-VN')}
+              </div>
+              <div style={{ fontSize: '12px', color: '#16A34A', display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: '#16A34A', display: 'inline-block' }} />
+                Hệ thống chấm công trực tuyến
+              </div>
+            </div>
+
+            {/* Card 2: Trạng thái ca làm việc */}
+            <div style={{
+              backgroundColor: '#FFFFFF',
+              border: '1px solid #E2E8F0',
+              borderRadius: '12px',
+              padding: '16px 20px',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
+            }}>
+              <div style={{ fontSize: '12px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                Trạng thái hôm nay
+              </div>
+              <div style={{
+                fontSize: '18px',
+                fontWeight: 800,
+                marginTop: '6px',
+                color: isCompleted ? '#16A34A' : isWorking ? '#0056B3' : isCheckout ? '#16A34A' : isNeedExplanation ? '#DC2626' : '#D97706'
+              }}>
+                {isCompleted ? '✅ Đã hoàn thành ca' : isWorking ? '⚡ Đang trong ca làm' : isCheckout ? (punchState?.shift?.isCheckoutWindow ? '🕒 Chuẩn bị tan ca & Checkout' : '🕒 Sẵn sàng Check-out') : isNeedExplanation ? '⚠️ Chưa Check-in (Cần giải trình)' : isWorkingNotCheckedIn ? '⚠️ Đang trong ca (Chưa Check-in)' : '🕒 Chưa bấm Check-in'}
+              </div>
+              <div style={{ fontSize: '12px', color: '#64748B', marginTop: '6px' }}>
+                {punchState?.firstPunchTime ? `Vào: ${punchState.firstPunchTime}` : (punchState?.shift ? `Ca: ${punchState.shift.shiftStart} – ${punchState.shift.shiftEnd}` : 'Chưa có giờ vào')}
+                {punchState?.lastPunchTime ? ` · Ra: ${punchState.lastPunchTime}` : ''}
+              </div>
+            </div>
+
+            {/* Card 3: Số lượt bấm trong ngày */}
+            <div style={{
+              backgroundColor: '#FFFFFF',
+              border: '1px solid #E2E8F0',
+              borderRadius: '12px',
+              padding: '16px 20px',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
+            }}>
+              <div style={{ fontSize: '12px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                Lượt điểm danh hôm nay
+              </div>
+              <div style={{ fontSize: '28px', fontWeight: 800, color: '#0F172A', marginTop: '4px' }}>
+                {punchState?.validPunchCount ?? punchState?.todayPunchCount ?? 0} / 2 <span style={{ fontSize: '14px', fontWeight: 600, color: '#64748B' }}>lượt</span>
+              </div>
+              <div style={{ fontSize: '12px', color: '#64748B', marginTop: '4px' }}>
+                {punchState?.punches && punchState.punches.length > (punchState?.validPunchCount ?? punchState?.todayPunchCount ?? 0)
+                  ? `(Có ${punchState.punches.length} lượt quẹt, ${punchState.punches.length - (punchState?.validPunchCount ?? punchState?.todayPunchCount ?? 0)} ngoài VP/chưa duyệt)`
+                  : 'Quy định: 1 lượt Check-in & 1 lượt Check-out'}
+              </div>
+            </div>
+
+            {/* Card 4: Quỹ phép năm */}
+            <div style={{
+              backgroundColor: '#FFFFFF',
+              border: '1px solid #E2E8F0',
+              borderRadius: '12px',
+              padding: '16px 20px',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.03)'
+            }}>
+              <div style={{ fontSize: '12px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                Quỹ phép năm còn lại
+              </div>
+              <div style={{ fontSize: '28px', fontWeight: 800, color: '#0F766E', marginTop: '4px' }}>
+                {leaveBalance?.available ?? 0} <span style={{ fontSize: '14px', fontWeight: 600, color: '#64748B' }}>ngày</span>
+              </div>
+              <div style={{ fontSize: '12px', color: '#64748B', marginTop: '4px' }}>
+                Đã dùng: {leaveBalance?.used ?? 0} ngày · Tồn năm trước: {leaveBalance?.carryOpening ?? 0}
+              </div>
+            </div>
+          </div>
           {/* THẺ THÔNG TIN XÁC THỰC MÁY TÍNH & ĐỊA CHỈ MAC */}
           <div style={{
             backgroundColor: '#FFFFFF',
@@ -734,10 +892,10 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
               }}>
                 {isCompleted ? (
                   <span>✅ Đã hoàn tất ca hôm nay (Vào: <b>{punchState?.firstPunchTime}</b> — Ra: <b>{punchState?.lastPunchTime}</b>)</span>
-                ) : isWorking ? (
-                  <span>⚡ Đang trong ca làm việc (Check-in lúc: <b>{punchState?.firstPunchTime}</b> — Giờ tan ca: <b>{punchState?.shift?.shiftEnd || '17:00'}</b>)</span>
                 ) : isCheckout ? (
-                  <span>⚡ Đã đến khung giờ chuẩn bị ra về ({punchState?.shift?.checkoutStartTime || '16:30'} – {punchState?.shift?.shiftEnd || '17:00'})! Bạn có thể điểm danh Ra về.</span>
+                  <span>⚡ {punchState?.shift?.isCheckoutWindow ? `Đã đến khung giờ chuẩn bị ra về (${punchState?.shift?.checkoutStartTime || '16:30'} – ${punchState?.shift?.shiftEnd || '17:00'})! Bạn có thể điểm danh Ra về.` : `Đang trong ca làm việc (Check-in lúc: ${punchState?.firstPunchTime} — Giờ tan ca: ${punchState?.shift?.shiftEnd || '17:00'}). Bạn có thể điểm danh Ra về (Check-out).`}</span>
+                ) : isWorking ? (
+                  <span>⚡ Vừa Check-in lúc: <b>{punchState?.firstPunchTime}</b>. Khóa Check-out tối thiểu 30 phút (còn {punchState?.remainingMinutesToCheckout ?? 30} phút).</span>
                 ) : isNeedExplanation ? (
                   <span>⚠️ <strong>Bạn chưa điểm danh vào ca lúc sáng.</strong> Hiện tại ({currentTime.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}) đang là khung giờ chuẩn bị ra về ({punchState?.shift?.checkoutStartTime || '16:30'} – {punchState?.shift?.shiftEnd || '17:00'}). Cần gửi đơn giải trình để được ghi nhận công.</span>
                 ) : isWorkingNotCheckedIn ? (
@@ -808,7 +966,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 ) : (
                   <button
                     type="button"
-                    onClick={() => handlePcPunch()}
+                    onClick={() => handlePcPunch(isCheckout ? 'CHECK_OUT' : undefined)}
                     disabled={punching || punchCooldownSeconds > 0 || isCompleted || isWorking}
                     style={{
                       width: '100%',
@@ -817,12 +975,12 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                       backgroundColor: isCompleted
                         ? '#0D9488'
                         : isWorking
-                        ? '#F1F5F9'
-                        : punchCooldownSeconds > 0
-                        ? '#64748B'
-                        : isCheckout
-                        ? '#16A34A'
-                        : '#0056B3',
+                          ? '#F1F5F9'
+                          : punchCooldownSeconds > 0
+                            ? '#64748B'
+                            : isCheckout
+                              ? '#16A34A'
+                              : '#0056B3',
                       color: isWorking ? '#64748B' : '#FFFFFF',
                       border: isCompleted ? '2px solid #5EEAD4' : isWorking ? '1px solid #CBD5E1' : 'none',
                       borderRadius: '12px',
@@ -929,7 +1087,7 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                           </span>
                         </td>
                         <td style={{ padding: '10px 14px', fontFamily: 'monospace', fontWeight: 600, color: '#334155' }}>
-                          {macAddress || '—'}
+                          {p.channel === 'PC_WEB' ? (macAddress || '—') : '—'}
                         </td>
                         <td style={{ padding: '10px 14px' }}>
                           <span style={{
@@ -957,104 +1115,164 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
       )}
 
       {/* ============================================================== */}
-      {/* TAB 2: LỊCH SỬ CHẤM CÔNG DẠNG BẢNG WEB ADMIN                    */}
+      {/* TAB 2: BẢNG CHẤM CÔNG CÁ NHÂN & LỊCH SỬ ĐIỂM DANH               */}
       {/* ============================================================== */}
       {activeTab === 'history' && (
-        <div style={{
-          backgroundColor: '#FFFFFF',
-          border: '1px solid #E2E8F0',
-          borderRadius: '16px',
-          padding: '24px',
-          boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
-            <div>
-              <h2 style={{ fontSize: '16px', fontWeight: 800, color: '#0F172A', margin: 0 }}>
-                LỊCH SỬ ĐIỂM DANH TRONG THÁNG
-              </h2>
-              <p style={{ fontSize: '12px', color: '#64748B', marginTop: '2px', marginBottom: 0 }}>
-                Bảng tổng hợp giờ vào, giờ ra và các lượt quẹt hợp lệ của bạn.
-              </p>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ fontSize: '12px', color: '#64748B' }}>Tổng số ngày có công:</span>
-              <span style={{
-                backgroundColor: '#EFF6FF',
-                color: '#0056B3',
-                padding: '4px 10px',
-                borderRadius: '6px',
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          {/* THANH ĐIỀU HƯỚNG CHẾ ĐỘ XEM: BẢNG CÔNG THÁNG CHÍNH THỨC vs NHẬT KÝ QUẸT */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            backgroundColor: '#F1F5F9',
+            padding: '4px',
+            borderRadius: '10px',
+            width: 'fit-content'
+          }}>
+            <button
+              type="button"
+              onClick={() => setHistoryMode('TIMESHEET')}
+              style={{
+                backgroundColor: historyMode === 'TIMESHEET' ? '#FFFFFF' : 'transparent',
+                color: historyMode === 'TIMESHEET' ? '#0056B3' : '#64748B',
+                fontWeight: 700,
                 fontSize: '13px',
-                fontWeight: 800
-              }}>
-                {attendanceHistory.length} ngày
-              </span>
-            </div>
+                border: 'none',
+                borderRadius: '8px',
+                padding: '8px 16px',
+                boxShadow: historyMode === 'TIMESHEET' ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px'
+              }}
+            >
+              <Calendar size={16} />
+              Bảng chấm công cá nhân theo kỳ
+            </button>
+            <button
+              type="button"
+              onClick={() => setHistoryMode('RAW_LOGS')}
+              style={{
+                backgroundColor: historyMode === 'RAW_LOGS' ? '#FFFFFF' : 'transparent',
+                color: historyMode === 'RAW_LOGS' ? '#0056B3' : '#64748B',
+                fontWeight: 700,
+                fontSize: '13px',
+                border: 'none',
+                borderRadius: '8px',
+                padding: '8px 16px',
+                boxShadow: historyMode === 'RAW_LOGS' ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px'
+              }}
+            >
+              <Clock size={16} />
+              Nhật ký quẹt thẻ (30 ngày gần nhất)
+            </button>
           </div>
 
-          {attendanceHistory.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '40px 16px', color: '#94A3B8', fontSize: '13px' }}>
-              Chưa có dữ liệu chấm công nào trong khoảng thời gian này.
-            </div>
+          {historyMode === 'TIMESHEET' ? (
+            <PersonalTimesheetView isMobile={false} />
           ) : (
-              <div style={{ overflowX: 'auto' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-                  <thead>
-                    <tr style={{ backgroundColor: '#F8FAFC', borderBottom: '1px solid #E2E8F0', textAlign: 'left', color: '#475569' }}>
-                      <th style={{ padding: '12px 14px', minWidth: '130px', whiteSpace: 'nowrap' }}>Ngày làm việc</th>
-                      <th style={{ padding: '12px 14px', minWidth: '160px', whiteSpace: 'nowrap' }}>Giờ vào (Check-in)</th>
-                      <th style={{ padding: '12px 14px', minWidth: '160px', whiteSpace: 'nowrap' }}>Giờ ra (Check-out)</th>
-                      <th style={{ padding: '12px 14px', minWidth: '110px', whiteSpace: 'nowrap' }}>Hình thức</th>
-                      <th style={{ padding: '12px 14px', minWidth: '110px', whiteSpace: 'nowrap' }}>Trạng thái</th>
-                      <th style={{ padding: '12px 14px', minWidth: '140px', textAlign: 'right', whiteSpace: 'nowrap' }}>Chi tiết lượt bấm</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {attendanceHistory.map((item, idx) => (
-                      <tr key={item.workDate || idx} style={{ borderBottom: '1px solid #F1F5F9' }}>
-                        <td style={{ padding: '12px 14px', fontWeight: 700, color: '#0F172A', whiteSpace: 'nowrap' }}>
-                          {item.workDate}
-                        </td>
-                        <td style={{ padding: '12px 14px', fontWeight: 700, color: item.inTime ? '#16A34A' : '#94A3B8', whiteSpace: 'nowrap' }}>
-                          {item.inTime || '—'}
-                        </td>
-                        <td style={{ padding: '12px 14px', fontWeight: 700, color: item.outTime ? '#0056B3' : '#94A3B8', whiteSpace: 'nowrap' }}>
-                          {item.outTime || '—'}
-                        </td>
-                        <td style={{ padding: '12px 14px', whiteSpace: 'nowrap' }}>
-                          <span style={{
-                            backgroundColor: '#F1F5F9',
-                            color: '#475569',
-                            padding: '3px 8px',
-                            borderRadius: '6px',
-                            fontSize: '11px',
-                            fontWeight: 700,
-                            whiteSpace: 'nowrap'
-                          }}>
-                            {item.source || 'PC / APP'}
-                          </span>
-                        </td>
-                        <td style={{ padding: '12px 14px', whiteSpace: 'nowrap' }}>
-                          <span style={{
-                            backgroundColor: item.hasPendingReview ? '#FEF3C7' : '#DCFCE7',
-                            color: item.hasPendingReview ? '#92400E' : '#166534',
-                            padding: '3px 8px',
-                            borderRadius: '6px',
-                            fontSize: '11px',
-                            fontWeight: 700,
-                            whiteSpace: 'nowrap'
-                          }}>
-                            {item.hasPendingReview ? 'Chờ duyệt' : 'Hợp lệ'}
-                          </span>
-                        </td>
-                        <td style={{ padding: '12px 14px', textAlign: 'right', color: '#64748B', fontSize: '12px', whiteSpace: 'nowrap' }}>
-                          {item.punches?.length || 0} lượt quẹt
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <div style={{
+              backgroundColor: '#FFFFFF',
+              border: '1px solid #E2E8F0',
+              borderRadius: '16px',
+              padding: '24px',
+              boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px', flexWrap: 'wrap', gap: '12px' }}>
+                <div>
+                  <h2 style={{ fontSize: '16px', fontWeight: 800, color: '#0F172A', margin: 0 }}>
+                    LỊCH SỬ ĐIỂM DANH TRONG THÁNG
+                  </h2>
+                  <p style={{ fontSize: '12px', color: '#64748B', marginTop: '2px', marginBottom: 0 }}>
+                    Bảng tổng hợp giờ vào, giờ ra và các lượt quẹt hợp lệ của bạn.
+                  </p>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '12px', color: '#64748B' }}>Tổng số ngày có công:</span>
+                  <span style={{
+                    backgroundColor: '#EFF6FF',
+                    color: '#0056B3',
+                    padding: '4px 10px',
+                    borderRadius: '6px',
+                    fontSize: '13px',
+                    fontWeight: 800
+                  }}>
+                    {attendanceHistory.length} ngày
+                  </span>
+                </div>
               </div>
+
+              {attendanceHistory.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '40px 16px', color: '#94A3B8', fontSize: '13px' }}>
+                  Chưa có dữ liệu chấm công nào trong khoảng thời gian này.
+                </div>
+              ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                    <thead>
+                      <tr style={{ backgroundColor: '#F8FAFC', borderBottom: '1px solid #E2E8F0', textAlign: 'left', color: '#475569' }}>
+                        <th style={{ padding: '12px 14px', minWidth: '130px', whiteSpace: 'nowrap' }}>Ngày làm việc</th>
+                        <th style={{ padding: '12px 14px', minWidth: '160px', whiteSpace: 'nowrap' }}>Giờ vào (Check-in)</th>
+                        <th style={{ padding: '12px 14px', minWidth: '160px', whiteSpace: 'nowrap' }}>Giờ ra (Check-out)</th>
+                        <th style={{ padding: '12px 14px', minWidth: '110px', whiteSpace: 'nowrap' }}>Hình thức</th>
+                        <th style={{ padding: '12px 14px', minWidth: '110px', whiteSpace: 'nowrap' }}>Trạng thái</th>
+                        <th style={{ padding: '12px 14px', minWidth: '140px', textAlign: 'right', whiteSpace: 'nowrap' }}>Chi tiết lượt bấm</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {attendanceHistory.map((item, idx) => (
+                        <tr key={item.workDate || idx} style={{ borderBottom: '1px solid #F1F5F9' }}>
+                          <td style={{ padding: '12px 14px', fontWeight: 700, color: '#0F172A', whiteSpace: 'nowrap' }}>
+                            {item.workDate}
+                          </td>
+                          <td style={{ padding: '12px 14px', fontWeight: 700, color: item.inTime ? '#16A34A' : '#94A3B8', whiteSpace: 'nowrap' }}>
+                            {item.inTime || '—'}
+                          </td>
+                          <td style={{ padding: '12px 14px', fontWeight: 700, color: item.outTime ? '#0056B3' : '#94A3B8', whiteSpace: 'nowrap' }}>
+                            {item.outTime || '—'}
+                          </td>
+                          <td style={{ padding: '12px 14px', whiteSpace: 'nowrap' }}>
+                            <span style={{
+                              backgroundColor: '#F1F5F9',
+                              color: '#475569',
+                              padding: '3px 8px',
+                              borderRadius: '6px',
+                              fontSize: '11px',
+                              fontWeight: 700,
+                              whiteSpace: 'nowrap'
+                            }}>
+                              {item.source || 'PC / APP'}
+                            </span>
+                          </td>
+                          <td style={{ padding: '12px 14px', whiteSpace: 'nowrap' }}>
+                            <span style={{
+                              backgroundColor: item.hasPendingReview ? '#FEF3C7' : '#DCFCE7',
+                              color: item.hasPendingReview ? '#92400E' : '#166534',
+                              padding: '3px 8px',
+                              borderRadius: '6px',
+                              fontSize: '11px',
+                              fontWeight: 700,
+                              whiteSpace: 'nowrap'
+                            }}>
+                              {item.hasPendingReview ? 'Chờ duyệt' : 'Hợp lệ'}
+                            </span>
+                          </td>
+                          <td style={{ padding: '12px 14px', textAlign: 'right', color: '#64748B', fontSize: '12px', whiteSpace: 'nowrap' }}>
+                            {item.punches?.length || 0} lượt quẹt
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -1152,13 +1370,15 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
                   <thead>
                     <tr style={{ backgroundColor: '#F8FAFC', borderBottom: '1px solid #E2E8F0', textAlign: 'left', color: '#475569' }}>
-                      <th style={{ padding: '10px 14px', minWidth: '85px', whiteSpace: 'nowrap' }}>Mã đơn</th>
-                      <th style={{ padding: '10px 14px', minWidth: '130px', whiteSpace: 'nowrap' }}>Loại đơn</th>
-                      <th style={{ padding: '10px 14px', minWidth: '170px', whiteSpace: 'nowrap' }}>Thời gian</th>
+                      <th style={{ padding: '10px 14px', minWidth: '80px', whiteSpace: 'nowrap' }}>Mã đơn</th>
+                      <th style={{ padding: '10px 14px', minWidth: '120px', whiteSpace: 'nowrap' }}>Loại đơn</th>
+                      <th style={{ padding: '10px 14px', minWidth: '160px', whiteSpace: 'nowrap' }}>Thời gian</th>
                       <th style={{ padding: '10px 14px', minWidth: '120px', whiteSpace: 'nowrap' }}>Số ngày / Giờ</th>
-                      <th style={{ padding: '10px 14px', minWidth: '220px', whiteSpace: 'nowrap' }}>Lý do</th>
-                      <th style={{ padding: '10px 14px', minWidth: '120px', whiteSpace: 'nowrap' }}>Trạng thái</th>
-                      <th style={{ padding: '10px 14px', minWidth: '180px', whiteSpace: 'nowrap' }}>Phản hồi HCNS</th>
+                      <th style={{ padding: '10px 14px', minWidth: '200px', whiteSpace: 'nowrap' }}>Lý do</th>
+                      <th style={{ padding: '10px 14px', minWidth: '100px', textAlign: 'center', whiteSpace: 'nowrap' }}>Minh chứng</th>
+                      <th style={{ padding: '10px 14px', minWidth: '110px', whiteSpace: 'nowrap' }}>Trạng thái</th>
+                      <th style={{ padding: '10px 14px', minWidth: '160px', whiteSpace: 'nowrap' }}>Phản hồi HCNS</th>
+                      <th style={{ padding: '10px 14px', minWidth: '120px', textAlign: 'center', whiteSpace: 'nowrap' }}>Thao tác</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1189,6 +1409,33 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                         <td style={{ padding: '10px 14px', color: '#475569', maxWidth: '280px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {req.reason}
                         </td>
+                        <td style={{ padding: '10px 14px', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                          {((req.attachments && req.attachments.length > 0) || req.attachmentCount > 0) ? (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenAttachments(req)}
+                              style={{
+                                backgroundColor: '#EFF6FF',
+                                border: '1px solid #BFDBFE',
+                                color: '#1D4ED8',
+                                padding: '3px 8px',
+                                borderRadius: '6px',
+                                fontSize: '11px',
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px'
+                              }}
+                              title="Xem tệp minh chứng đính kèm"
+                            >
+                              <Paperclip size={12} />
+                              <span>{req.attachments?.length || req.attachmentCount} tệp</span>
+                            </button>
+                          ) : (
+                            <span style={{ color: '#94A3B8', fontSize: '11px' }}>—</span>
+                          )}
+                        </td>
                         <td style={{ padding: '10px 14px', whiteSpace: 'nowrap' }}>
                           <span style={{
                             backgroundColor: req.status === 'APPROVED' ? '#DCFCE7' : req.status === 'PENDING_HR' ? '#FEF3C7' : '#FEE2E2',
@@ -1204,6 +1451,58 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                         </td>
                         <td style={{ padding: '10px 14px', color: '#64748B', fontSize: '12px', whiteSpace: 'nowrap' }}>
                           {req.hrNote || '—'}
+                        </td>
+                        <td style={{ padding: '10px 14px', textAlign: 'center', whiteSpace: 'nowrap' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+                            {req.status === 'PENDING_HR' ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEditRequest(req)}
+                                  style={{
+                                    backgroundColor: '#F0FDF4',
+                                    border: '1px solid #BBF7D0',
+                                    color: '#15803D',
+                                    padding: '3px 8px',
+                                    borderRadius: '6px',
+                                    fontSize: '11px',
+                                    fontWeight: 700,
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '3px'
+                                  }}
+                                  title="Chỉnh sửa đơn này"
+                                >
+                                  <Edit2 size={12} />
+                                  <span>Sửa</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleCancelRequest(req.requestId)}
+                                  style={{
+                                    backgroundColor: '#FEF2F2',
+                                    border: '1px solid #FECACA',
+                                    color: '#B91C1C',
+                                    padding: '3px 8px',
+                                    borderRadius: '6px',
+                                    fontSize: '11px',
+                                    fontWeight: 700,
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '3px'
+                                  }}
+                                  title="Hủy đơn này"
+                                >
+                                  <Trash2 size={12} />
+                                  <span>Hủy</span>
+                                </button>
+                              </>
+                            ) : (
+                              <span style={{ fontSize: '11px', color: '#94A3B8' }}>—</span>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -1555,10 +1854,11 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                   style={{ width: '100%', padding: '9px 12px', borderRadius: '8px', border: '1px solid #CBD5E1', fontSize: '13px' }}
                 >
                   <option value="P">Nghỉ phép năm (P) — Hưởng 100% lương</option>
+                  <option value="P/2">Nghỉ phép nửa ngày (P/2) — 0.5 công</option>
+                  <option value="KL">Nghỉ không hưởng lương (KL) — Hết phép năm / việc riêng</option>
                   <option value="RO">Nghỉ bù (RO) — Trừ quỹ nghỉ bù</option>
                   <option value="TS">Nghỉ thai sản (TS) — Chế độ BHXH</option>
                   <option value="O">Nghỉ ốm (O) — Hưởng chế độ ốm đau</option>
-                  <option value="KL">Nghỉ không lương (KL)</option>
                 </select>
               </div>
 
@@ -1567,12 +1867,10 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                   <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
                     Từ ngày
                   </label>
-                  <input
-                    type="date"
+                  <DateInput
                     value={leaveFromDate}
-                    onChange={(e) => setLeaveFromDate(e.target.value)}
+                    onChange={(val) => setLeaveFromDate(val)}
                     required
-                    style={{ width: '100%', padding: '9px 12px', borderRadius: '8px', border: '1px solid #CBD5E1', fontSize: '13px' }}
                   />
                 </div>
 
@@ -1580,12 +1878,10 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                   <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
                     Đến ngày
                   </label>
-                  <input
-                    type="date"
+                  <DateInput
                     value={leaveToDate}
-                    onChange={(e) => setLeaveToDate(e.target.value)}
+                    onChange={(val) => setLeaveToDate(val)}
                     required
-                    style={{ width: '100%', padding: '9px 12px', borderRadius: '8px', border: '1px solid #CBD5E1', fontSize: '13px' }}
                   />
                 </div>
               </div>
@@ -1603,6 +1899,24 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                   <option value="MORNING">Buổi sáng (0.5 công)</option>
                   <option value="AFTERNOON">Buổi chiều (0.5 công)</option>
                 </select>
+              </div>
+
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                  Ảnh minh chứng (tùy chọn / tự động chuyển sang WebP)
+                </label>
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*"
+                  onChange={(e) => setLeaveFiles(Array.from(e.target.files || []))}
+                  style={{ width: '100%', fontSize: '12px' }}
+                />
+                {leaveFiles.length > 0 && (
+                  <div style={{ fontSize: '12px', color: '#0284c7', marginTop: '4px', fontWeight: 600 }}>
+                    ✓ Đã chọn {leaveFiles.length} ảnh (sẽ tối ưu sang WebP khi lưu)
+                  </div>
+                )}
               </div>
 
               <div style={{ marginBottom: '16px' }}>
@@ -1629,9 +1943,10 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  style={{ backgroundColor: '#0056B3', color: '#FFFFFF', border: 'none', padding: '9px 18px', borderRadius: '8px', fontSize: '13px', fontWeight: 700, cursor: 'pointer' }}
+                  disabled={submittingLeave}
+                  style={{ backgroundColor: submittingLeave ? '#94A3B8' : '#0056B3', color: '#FFFFFF', border: 'none', padding: '9px 18px', borderRadius: '8px', fontSize: '13px', fontWeight: 700, cursor: submittingLeave ? 'not-allowed' : 'pointer' }}
                 >
-                  Gửi Đơn Nghỉ Phép
+                  {submittingLeave ? 'Đang nén WebP...' : 'Gửi Đơn Nghỉ Phép'}
                 </button>
               </div>
             </form>
@@ -1683,12 +1998,10 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
                   Ngày cần giải trình
                 </label>
-                <input
-                  type="date"
+                <DateInput
                   value={regulDate}
-                  onChange={(e) => setRegulDate(e.target.value)}
+                  onChange={(val) => setRegulDate(val)}
                   required
-                  style={{ width: '100%', padding: '9px 12px', borderRadius: '8px', border: '1px solid #CBD5E1', fontSize: '13px' }}
                 />
               </div>
 
@@ -1736,6 +2049,24 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 </select>
               </div>
 
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                  Ảnh minh chứng (tùy chọn / tự động chuyển sang WebP)
+                </label>
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*"
+                  onChange={(e) => setRegulFiles(Array.from(e.target.files || []))}
+                  style={{ width: '100%', fontSize: '12px' }}
+                />
+                {regulFiles.length > 0 && (
+                  <div style={{ fontSize: '12px', color: '#0284c7', marginTop: '4px', fontWeight: 600 }}>
+                    ✓ Đã chọn {regulFiles.length} ảnh (sẽ tối ưu sang WebP khi lưu)
+                  </div>
+                )}
+              </div>
+
               <div style={{ marginBottom: '16px' }}>
                 <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
                   Chi tiết lý do
@@ -1760,12 +2091,522 @@ export const PcCheckinView: React.FC<PcCheckinViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  style={{ backgroundColor: '#0F766E', color: '#FFFFFF', border: 'none', padding: '9px 18px', borderRadius: '8px', fontSize: '13px', fontWeight: 700, cursor: 'pointer' }}
+                  disabled={submittingRegul}
+                  style={{ backgroundColor: submittingRegul ? '#94A3B8' : '#0F766E', color: '#FFFFFF', border: 'none', padding: '9px 18px', borderRadius: '8px', fontSize: '13px', fontWeight: 700, cursor: submittingRegul ? 'not-allowed' : 'pointer' }}
                 >
-                  Gửi Giải Trình
+                  {submittingRegul ? 'Đang nén WebP...' : 'Gửi Giải Trình'}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* MODAL 3: CHỈNH SỬA ĐƠN (PHÉP HOẶC GIẢI TRÌNH CHẤM CÔNG)        */}
+      {/* ============================================================== */}
+      {editingRequest && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(15, 23, 42, 0.65)',
+          backdropFilter: 'blur(3px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1100,
+          padding: '16px'
+        }}>
+          <div style={{
+            backgroundColor: '#FFFFFF',
+            borderRadius: '16px',
+            padding: '24px',
+            width: '100%',
+            maxWidth: '540px',
+            maxHeight: '90vh',
+            overflowY: 'auto',
+            boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <div>
+                <div style={{ fontWeight: 800, fontSize: '16px', color: '#0F172A' }}>
+                  {editingRequest.requestType === 'LEAVE' ? 'Chỉnh Sửa Đơn Xin Nghỉ Phép' : 'Chỉnh Sửa Đơn Giải Trình Chấm Công'}
+                </div>
+                <div style={{ fontSize: '12px', color: '#64748B', marginTop: '2px' }}>
+                  Mã đơn: #{editingRequest.requestId} (Chỉ được chỉnh sửa khi đang Chờ duyệt)
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingRequest(null)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B' }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditRequest}>
+              {editingRequest.requestType === 'LEAVE' ? (
+                <>
+                  <div style={{ marginBottom: '14px' }}>
+                    <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                      Loại ngày phép
+                    </label>
+                    <select
+                      value={editLeaveCode}
+                      onChange={(e) => setEditLeaveCode(e.target.value)}
+                      style={{ width: '100%', padding: '9px 12px', borderRadius: '8px', border: '1px solid #CBD5E1', fontSize: '13px' }}
+                    >
+                      <option value="P">P - Nghỉ phép năm (hưởng 100% lương)</option>
+                      <option value="1/2P">P/2 - Nghỉ nửa ngày phép năm (hưởng 50% lương)</option>
+                      <option value="KL">KL - Nghỉ không hưởng lương (hết phép năm / việc riêng)</option>
+                      <option value="KP">KP - Nghỉ không lương</option>
+                      <option value="CD">CD - Nghỉ chế độ (thai sản / cưới / tang...)</option>
+                      <option value="BL">BL - Nghỉ bù Lễ Tết / Sự kiện</option>
+                    </select>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+                    <div>
+                      <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                        Từ ngày
+                      </label>
+                      <DateInput
+                        value={editFromDate}
+                        onChange={(val) => setEditFromDate(val)}
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                        Đến ngày
+                      </label>
+                      <DateInput
+                        value={editToDate}
+                        onChange={(val) => setEditToDate(val)}
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: '14px' }}>
+                    <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                      Buổi nghỉ
+                    </label>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+                      {(['FULL', 'MORNING', 'AFTERNOON'] as const).map((part) => (
+                        <button
+                          key={part}
+                          type="button"
+                          onClick={() => setEditDayPart(part)}
+                          style={{
+                            padding: '8px',
+                            borderRadius: '8px',
+                            border: editDayPart === part ? '2px solid #0056B3' : '1px solid #CBD5E1',
+                            backgroundColor: editDayPart === part ? '#EFF6FF' : '#FFFFFF',
+                            color: editDayPart === part ? '#0056B3' : '#475569',
+                            fontWeight: editDayPart === part ? 700 : 500,
+                            fontSize: '12px',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          {part === 'FULL' ? 'Cả ngày (1.0)' : part === 'MORNING' ? 'Sáng (0.5)' : 'Chiều (0.5)'}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{ marginBottom: '14px' }}>
+                    <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                      Ngày giải trình
+                    </label>
+                    <DateInput
+                      value={editFromDate}
+                      onChange={(val) => setEditFromDate(val)}
+                      required
+                    />
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+                    <div>
+                      <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                        Giờ vào thực tế
+                      </label>
+                      <input
+                        type="time"
+                        value={editInTime}
+                        onChange={(e) => setEditInTime(e.target.value)}
+                        required
+                        style={{ width: '100%', padding: '9px 12px', borderRadius: '8px', border: '1px solid #CBD5E1', fontSize: '13px' }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                        Giờ ra thực tế
+                      </label>
+                      <input
+                        type="time"
+                        value={editOutTime}
+                        onChange={(e) => setEditOutTime(e.target.value)}
+                        required
+                        style={{ width: '100%', padding: '9px 12px', borderRadius: '8px', border: '1px solid #CBD5E1', fontSize: '13px' }}
+                      />
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: '14px' }}>
+                    <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                      Lý do giải trình
+                    </label>
+                    <select
+                      value={editReasonCode}
+                      onChange={(e) => setEditReasonCode(e.target.value)}
+                      style={{ width: '100%', padding: '9px 12px', borderRadius: '8px', border: '1px solid #CBD5E1', fontSize: '13px' }}
+                    >
+                      <option value="Quên bấm">Quên bấm chấm công</option>
+                      <option value="Công tác ngoài">Đi công tác ngoài văn phòng</option>
+                      <option value="Sự cố kỹ thuật">Sự cố máy tính / mất điện / mất mạng</option>
+                      <option value="Lý do khác">Lý do khác</option>
+                    </select>
+                  </div>
+                </>
+              )}
+
+              {/* DANH SÁCH TỆP MINH CHỨNG ĐÃ CÓ */}
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                  Tệp minh chứng hiện tại ({editingRequest.attachments?.length || 0})
+                </label>
+                {editingRequest.attachments && editingRequest.attachments.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '8px' }}>
+                    {editingRequest.attachments.map((att) => (
+                      <div
+                        key={att.attachmentId}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: '6px 10px',
+                          backgroundColor: '#F8FAFC',
+                          border: '1px solid #E2E8F0',
+                          borderRadius: '6px',
+                          fontSize: '12px'
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', overflow: 'hidden' }}>
+                          <Paperclip size={13} color="#0056B3" />
+                          <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '280px' }}>
+                            {att.originalFileName}
+                          </span>
+                          <span style={{ color: '#94A3B8', fontSize: '11px' }}>
+                            ({Math.round(att.fileSizeBytes / 1024)} KB)
+                          </span>
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <button
+                            type="button"
+                            onClick={() => setPreviewAttachmentId(att.attachmentId)}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#0056B3', padding: '2px' }}
+                            title="Xem ảnh"
+                          >
+                            <Eye size={14} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteExistingAttachment(att.attachmentId)}
+                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#DC2626', padding: '2px' }}
+                            title="Xóa tệp này"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ fontSize: '12px', color: '#94A3B8', fontStyle: 'italic', marginBottom: '8px' }}>
+                    Chưa có tệp minh chứng đính kèm.
+                  </div>
+                )}
+
+                <label style={{ fontSize: '12px', fontWeight: 600, color: '#475569', display: 'block', marginBottom: '4px' }}>
+                  Tải thêm ảnh minh chứng mới:
+                </label>
+                <input
+                  type="file"
+                  multiple
+                  accept="image/*"
+                  onChange={(e) => setEditNewFiles(Array.from(e.target.files || []))}
+                  style={{ width: '100%', fontSize: '12px' }}
+                />
+                {editNewFiles.length > 0 && (
+                  <div style={{ fontSize: '12px', color: '#0284C7', marginTop: '4px', fontWeight: 600 }}>
+                    ✓ Sẽ tải thêm {editNewFiles.length} ảnh mới (tự động nén WebP)
+                  </div>
+                )}
+              </div>
+
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ fontSize: '12px', fontWeight: 700, color: '#334155', display: 'block', marginBottom: '6px' }}>
+                  Lý do chi tiết
+                </label>
+                <textarea
+                  value={editReason}
+                  onChange={(e) => setEditReason(e.target.value)}
+                  rows={3}
+                  required
+                  placeholder="Ghi rõ lý do cần điều chỉnh..."
+                  style={{ width: '100%', padding: '9px 12px', borderRadius: '8px', border: '1px solid #CBD5E1', fontSize: '13px' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => setEditingRequest(null)}
+                  style={{ backgroundColor: '#F1F5F9', color: '#475569', border: 'none', padding: '9px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 600, cursor: 'pointer' }}
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={submittingEdit}
+                  style={{
+                    backgroundColor: submittingEdit ? '#94A3B8' : '#0056B3',
+                    color: '#FFFFFF',
+                    border: 'none',
+                    padding: '9px 18px',
+                    borderRadius: '8px',
+                    fontSize: '13px',
+                    fontWeight: 700,
+                    cursor: submittingEdit ? 'not-allowed' : 'pointer'
+                  }}
+                >
+                  {submittingEdit ? 'Đang lưu...' : 'Lưu Cập Nhật'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* MODAL 4: XEM TỆP MINH CHỨNG CỦA ĐƠN                            */}
+      {/* ============================================================== */}
+      {viewingAttachmentReq && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(15, 23, 42, 0.65)',
+          backdropFilter: 'blur(3px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1100,
+          padding: '16px'
+        }}>
+          <div style={{
+            backgroundColor: '#FFFFFF',
+            borderRadius: '16px',
+            padding: '24px',
+            width: '100%',
+            maxWidth: '520px',
+            maxHeight: '85vh',
+            overflowY: 'auto',
+            boxShadow: '0 20px 25px -5px rgba(0,0,0,0.1)'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <div>
+                <div style={{ fontWeight: 800, fontSize: '16px', color: '#0F172A' }}>
+                  Tệp Minh Chứng Đơn #{viewingAttachmentReq.requestId}
+                </div>
+                <div style={{ fontSize: '12px', color: '#64748B' }}>
+                  {viewingAttachmentReq.requestType === 'LEAVE' ? 'Đơn nghỉ phép' : 'Đơn giải trình chấm công'} — {viewingAttachmentReq.fromDate}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingAttachmentReq(null)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B' }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {viewingAttachmentReq.attachments && viewingAttachmentReq.attachments.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                {viewingAttachmentReq.attachments.map((att) => {
+                  const downloadUrl = requestsApi.getAttachmentUrl(att.attachmentId, true);
+                  const isImage = att.mimeType.startsWith('image/');
+                  const isWebp = att.mimeType === 'image/webp' || att.originalFileName.toLowerCase().endsWith('.webp');
+
+                  return (
+                    <div
+                      key={att.attachmentId}
+                      style={{
+                        padding: '10px 14px',
+                        backgroundColor: '#F8FAFC',
+                        border: '1px solid #E2E8F0',
+                        borderRadius: '10px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '12px'
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden' }}>
+                        <Paperclip size={16} color="#0056B3" />
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{ fontWeight: 700, fontSize: '13px', color: '#0F172A', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '280px' }}>
+                              {att.originalFileName}
+                            </span>
+                            {isWebp && (
+                              <span style={{
+                                backgroundColor: '#ecfdf5',
+                                color: '#047857',
+                                border: '1px solid #a7f3d0',
+                                padding: '1px 5px',
+                                borderRadius: '4px',
+                                fontSize: '10px',
+                                fontWeight: 700
+                              }}>
+                                WebP
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: '11px', color: '#64748B' }}>
+                            {Math.round(att.fileSizeBytes / 1024)} KB
+                          </div>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        {isImage && (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewAttachmentId(att.attachmentId)}
+                            style={{
+                              backgroundColor: '#EFF6FF',
+                              border: '1px solid #BFDBFE',
+                              color: '#1D4ED8',
+                              padding: '5px 10px',
+                              borderRadius: '6px',
+                              fontSize: '12px',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px'
+                            }}
+                          >
+                            <Eye size={13} />
+                            <span>Xem</span>
+                          </button>
+                        )}
+                        <a
+                          href={downloadUrl}
+                          download={att.originalFileName}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={{
+                            backgroundColor: '#F1F5F9',
+                            border: '1px solid #CBD5E1',
+                            color: '#334155',
+                            padding: '5px 10px',
+                            borderRadius: '6px',
+                            fontSize: '12px',
+                            fontWeight: 600,
+                            textDecoration: 'none'
+                          }}
+                        >
+                          Tải về
+                        </a>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div style={{ textAlign: 'center', padding: '30px 16px', color: '#94A3B8', fontSize: '13px', fontStyle: 'italic' }}>
+                Không có tệp minh chứng đính kèm cho đơn này.
+              </div>
+            )}
+
+            <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                type="button"
+                onClick={() => setViewingAttachmentReq(null)}
+                style={{ backgroundColor: '#F1F5F9', color: '#475569', border: 'none', padding: '8px 16px', borderRadius: '8px', fontSize: '13px', fontWeight: 600, cursor: 'pointer' }}
+              >
+                Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* MODAL 5: XEM PHÓNG TO ẢNH MINH CHỨNG                           */}
+      {/* ============================================================== */}
+      {previewAttachmentId && (
+        <div
+          onClick={() => setPreviewAttachmentId(null)}
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.85)',
+            zIndex: 1200,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px',
+            cursor: 'zoom-out'
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: 'relative',
+              maxWidth: '90vw',
+              maxHeight: '90vh',
+              backgroundColor: '#FFFFFF',
+              borderRadius: '12px',
+              overflow: 'hidden',
+              boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)'
+            }}
+          >
+            <div style={{ padding: '8px 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #E2E8F0', backgroundColor: '#F8FAFC' }}>
+              <span style={{ fontSize: '12px', fontWeight: 700, color: '#334155' }}>Minh chứng đính kèm</span>
+              <button
+                type="button"
+                onClick={() => setPreviewAttachmentId(null)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748B' }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <img
+              src={requestsApi.getAttachmentUrl(previewAttachmentId)}
+              alt="Ảnh minh chứng"
+              style={{
+                maxWidth: '85vw',
+                maxHeight: '80vh',
+                display: 'block',
+                objectFit: 'contain'
+              }}
+            />
           </div>
         </div>
       )}

@@ -34,7 +34,8 @@ public class EngineTests
         var options = new DbContextOptionsBuilder<AppDbContext>().UseSqlServer(connStr, o => o.UseCompatibilityLevel(100)).Options;
         using var db = new AppDbContext(options);
         var period = await db.Periods.FindAsync(4);
-        if (period == null) return;
+        var filePath = @"C:\Users\ADMIN\Downloads\Dữ liệu Chấm công.xlsx";
+        if (period == null || period.Status == PeriodStatus.Closed || !File.Exists(filePath)) return;
 
         var httpContext = new DefaultHttpContext();
         httpContext.User = new ClaimsPrincipal(new ClaimsIdentity(new[]
@@ -49,7 +50,6 @@ public class EngineTests
         var calcService = new CalculationService(db, accessService, auditService);
         var importService = new ImportService(db, accessService, auditService);
 
-        var filePath = @"C:\Users\ADMIN\Downloads\Dữ liệu Chấm công.xlsx";
         using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
 
         var report = await importService.InspectAndImportPunchesAsync(4, fs, "Dữ liệu Chấm công.xlsx", commit: true, CancellationToken.None);
@@ -114,12 +114,36 @@ public class EngineTests
         Assert.Contains(r.Warnings, w => w.Contains("Nghi nghỉ nửa buổi"));
     }
 
-    [Fact] // #6 vào 12:48 không có đơn
+    [Fact] // #6 vào 12:48 không có đơn: đi sớm ca chiều (13h), không phạt trễ sáng, nhận 0.5 công
     public void Case06_NoLeaveRequest()
     {
         var r = Calc(T(12, 48), T(18, 20));
-        Assert.Equal("0.5", r.Code); Assert.Equal(288, r.LateEarlyMinutes);
-        Assert.Contains(r.Warnings, w => w.Contains("Nghi nghỉ nửa buổi"));
+        Assert.Equal("0.5", r.Code);
+        Assert.Equal(0.5m, r.PaidValue);
+        Assert.Equal(0, r.LateEarlyMinutes);
+    }
+
+    [Fact] // Checkin 12:30 (trong giờ nghỉ trưa 12h-13h): đi sớm ca chiều, không tính trễ sáng, nhận 0.5 công
+    public void Case_CheckinDuringLunchBreak_12h30_NotLate_HalfDayCredit()
+    {
+        var r = Calc(T(12, 30), T(17, 0));
+        Assert.Equal("0.5", r.Code);
+        Assert.Equal(0.5m, r.PaidValue);
+        Assert.Equal(0, r.LateMinutes);
+        Assert.Equal(0, r.EarlyMinutes);
+        Assert.Equal(0, r.LateEarlyMinutes);
+    }
+
+    [Fact] // Quẹt 07:51 -> 16:13 (7.37h, trễ 0p, về sớm 47p < 120p): làm việc cả sáng lẫn chiều -> tính đủ 1.0 công và phạt 47p về sớm
+    public void Case_EarlyDeparture_07h51_To_16h13_CalculatesFullDay_And_47MinEarly()
+    {
+        var r = Calc(T(7, 51), T(16, 13));
+        Assert.Equal("1", r.Code);
+        Assert.Equal(1.0m, r.PaidValue);
+        Assert.Equal(0, r.LateMinutes);
+        Assert.Equal(47, r.EarlyMinutes);
+        Assert.Equal(47, r.LateEarlyMinutes);
+        Assert.Equal(442, r.WorkedMinutes); // 7.37 giờ = 442 phút
     }
 
     [Fact] // #7 có đơn P/2
@@ -161,7 +185,7 @@ public class EngineTests
     [Fact] // #11 không quẹt
     public void Case11_NoPunch()
     {
-        Assert.Equal("V", Calc(null, null).Code);
+        Assert.Equal(Codes.Vacant, Calc(null, null).Code);
     }
 
     [Fact] // #12 ngày Lễ kể cả không quẹt
@@ -292,14 +316,90 @@ public class EngineTests
         using var ms = new MemoryStream(bytes);
         using var wb = new ClosedXML.Excel.XLWorkbook(ms);
 
-        Assert.Equal(2, wb.Worksheets.Count);
+        Assert.Equal(3, wb.Worksheets.Count);
         Assert.True(wb.Worksheets.Contains("Chấm công"));
         Assert.True(wb.Worksheets.Contains("Đi trễ về sớm"));
+        Assert.True(wb.Worksheets.Contains("Phép năm"));
 
         var ws1 = wb.Worksheet("Chấm công");
         var ws2 = wb.Worksheet("Đi trễ về sớm");
+        var ws3 = wb.Worksheet("Phép năm");
 
         Assert.Equal("Times New Roman", ws1.Style.Font.FontName);
         Assert.Equal("Times New Roman", ws2.Style.Font.FontName);
+        Assert.Equal("Times New Roman", ws3.Style.Font.FontName);
+
+        Assert.Equal("Phép năm còn lại", ws1.Cell(3, 12).GetString());
+        Assert.Equal("Nghỉ không lương", ws1.Cell(3, 14).GetString());
+    }
+
+    [Fact]
+    public void ExportAttendanceSheet_PhepNam_OnlyShowsUpToPeriodMonth_AndLeavesFutureMonthsBlank()
+    {
+        var exportService = new ChamCong.Api.Services.ExcelExportService();
+        var company = new ChamCong.Api.Data.Company { Id = 1, Code = "SB", Name = "Superbrain Headquarters" };
+        var period = new ChamCong.Api.Data.Period
+        {
+            Id = 1,
+            CompanyId = 1,
+            Month = 8, // Tháng 8/2026
+            Year = 2026,
+            FromDate = new DateTime(2026, 8, 1),
+            ToDate = new DateTime(2026, 8, 31),
+            StandardDays = 26
+        };
+        var employees = new List<ChamCong.Api.Data.Employee>
+        {
+            new ChamCong.Api.Data.Employee { Id = 10, EmployeeCode = "SB010", FullName = "Trần Thị B", CompanyId = 1, StartDate = new DateTime(2020, 1, 1) }
+        };
+        var departments = new Dictionary<int, ChamCong.Api.Data.Department>();
+        var dayResults = new List<ChamCong.Api.Data.DayResult>();
+        var notes = new Dictionary<int, string>();
+        var codes = new Dictionary<string, ChamCong.Engine.CodeDef>();
+
+        // Giả lập dữ liệu nghỉ phép cả năm từ T1 đến T12
+        var yearlyLeave = new Dictionary<int, Dictionary<int, decimal>>
+        {
+            [10] = new Dictionary<int, decimal>
+            {
+                [1] = 1m, [2] = 0m, [3] = 0.5m, [4] = 1m, [5] = 0m, [6] = 2m, [7] = 1m, [8] = 0.5m,
+                [9] = 2m, [10] = 1m, [11] = 1.5m, [12] = 2m // T9..T12 có data trong DB nhưng không được hiện trong kỳ T8
+            }
+        };
+
+        var bytes = exportService.ExportAttendanceSheet(company, period, employees, departments, dayResults, notes, codes, isDraft: false, yearlyLeave);
+        using var ms = new MemoryStream(bytes);
+        using var wb = new ClosedXML.Excel.XLWorkbook(ms);
+
+        var wsPhepNam = wb.Worksheet("Phép năm");
+        // Kiểm tra tiêu đề các cột mới: Phép năm (Đầu kỳ), Tích lũy (Đến T8), Tổng phép hưởng, Đã dùng trong T8, Tồn phép (Tại T8)
+        Assert.Equal("Phép năm (Đầu kỳ)", wsPhepNam.Cell(4, 8).GetString());
+        Assert.Equal("Tích lũy (Đến T8)", wsPhepNam.Cell(4, 9).GetString());
+        Assert.Equal("Tổng phép hưởng", wsPhepNam.Cell(4, 10).GetString());
+        Assert.Equal("Đã dùng trong T8", wsPhepNam.Cell(4, 23).GetString());
+        Assert.Equal("Dùng lũy kế (T1-T8)", wsPhepNam.Cell(4, 24).GetString());
+        Assert.Equal("Tồn phép (Tại T8)", wsPhepNam.Cell(4, 25).GetString());
+
+        // Dòng nhân viên là dòng 7
+        // Cột T1 là col 11, T8 là col 18
+        // Cột T9 là col 19, T10 là col 20, T11 là col 21, T12 là col 22
+        Assert.Equal(1.0, wsPhepNam.Cell(7, 11).GetDouble());  // T1
+        Assert.Equal(0.5, wsPhepNam.Cell(7, 18).GetDouble());  // T8
+
+        // T9..T12 phải hoàn toàn rỗng (Blank)
+        Assert.True(wsPhepNam.Cell(7, 19).IsEmpty()); // T9
+        Assert.True(wsPhepNam.Cell(7, 20).IsEmpty()); // T10
+        Assert.True(wsPhepNam.Cell(7, 21).IsEmpty()); // T11
+        Assert.True(wsPhepNam.Cell(7, 22).IsEmpty()); // T12
+
+        // Dòng CỘNG (dòng 8) cho T9..T12 cũng phải rỗng
+        Assert.True(wsPhepNam.Cell(8, 19).IsEmpty());
+        Assert.True(wsPhepNam.Cell(8, 20).IsEmpty());
+        Assert.True(wsPhepNam.Cell(8, 21).IsEmpty());
+        Assert.True(wsPhepNam.Cell(8, 22).IsEmpty());
+
+        // Kiểm tra sheet Chấm công: Cột 12 tham chiếu Sheet Phép năm cột Y7 (Tồn phép Tại T8)
+        var wsChamCong = wb.Worksheet("Chấm công");
+        Assert.Equal("'Phép năm'!Y7", wsChamCong.Cell(6, 12).FormulaA1);
     }
 }

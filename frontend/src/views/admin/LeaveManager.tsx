@@ -21,8 +21,11 @@ import {
   XCircle,
   Clock,
   User,
-  Paperclip
+  Paperclip,
+  Eye,
+  Download
 } from 'lucide-react';
+import { DateInput } from '../../components/DateInput';
 
 interface LeaveManagerProps {
   onBack?: () => void;
@@ -53,6 +56,30 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
   const [decisionNote, setDecisionNote] = useState('');
   const [processingDecision, setProcessingDecision] = useState(false);
 
+  // Evidence Viewer
+  const [viewingEvidenceReq, setViewingEvidenceReq] = useState<UserRequestItem | null>(null);
+  const [evidenceAttachments, setEvidenceAttachments] = useState<{ id: number; name: string; url: string; size: number }[]>([]);
+  const [loadingEvidence, setLoadingEvidence] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState<{ url: string; name: string } | null>(null);
+
+  // Lắng nghe phím ESC để đóng popup modal
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (lightboxImage) {
+          setLightboxImage(null);
+        } else if (viewingEvidenceReq) {
+          setViewingEvidenceReq(null);
+        } else if (selectedRequestForDecision) {
+          setSelectedRequestForDecision(null);
+          setDecisionAction(null);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [lightboxImage, viewingEvidenceReq, selectedRequestForDecision]);
+
   // 1. LEAVE REQUESTS STATE (Dữ liệu ngoại lệ ngày nghỉ đã lưu / nhập tay)
   const [reqFrom, setReqFrom] = useState<string>(
     `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-01`
@@ -80,6 +107,7 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
 
   // 2. LEAVE FUNDS STATE
   const [fundYear, setFundYear] = useState<number>(today.getFullYear());
+  const [fundMonth, setFundMonth] = useState<number | 'ALL'>(today.getMonth() + 1);
   const [funds, setFunds] = useState<LeaveFund[]>([]);
   const [loadingFunds, setLoadingFunds] = useState(false);
   const [fundSearch, setFundSearch] = useState('');
@@ -127,12 +155,12 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
     setLoadingApprovals(true);
     try {
       const statusParam = approvalStatusFilter === 'ALL' ? undefined : approvalStatusFilter;
-      const data = await requestsApi.getHrRequests(statusParam, selectedCompany?.code);
+      const data = await requestsApi.getHrRequests(statusParam, selectedCompany?.code, 'LEAVE');
       const leaveOnly = data.filter(r => r.requestType === 'LEAVE');
       setApprovalRequests(leaveOnly);
 
       // Cập nhật số lượng đơn PENDING_HR
-      const allPendingData = await requestsApi.getHrRequests('PENDING_HR', selectedCompany?.code);
+      const allPendingData = await requestsApi.getHrRequests('PENDING_HR', selectedCompany?.code, 'LEAVE');
       const pendingLeaves = allPendingData.filter(r => r.requestType === 'LEAVE').length;
       setPendingCount(pendingLeaves);
     } catch (err: any) {
@@ -168,13 +196,67 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
     }
   };
 
+  const handleDeleteApprovalRequest = async (req: UserRequestItem) => {
+    const isAppr = req.status === 'APPROVED';
+    const confirmed = await toast.confirm({
+      title: isAppr ? 'Xóa đơn nghỉ phép đã duyệt' : 'Xóa đơn xin nghỉ phép',
+      message: isAppr
+        ? `Bạn có chắc muốn xóa đơn nghỉ phép của nhân viên ${req.fullName || req.employeeCode} (${req.fromDate}${req.fromDate !== req.toDate ? ' đến ' + req.toDate : ''})?\n\nDo đơn này đã được duyệt trước đó, hệ thống sẽ tự động thu hồi ngày nghỉ và hoàn trả lại ${req.daysRequested} ngày vào quỹ phép năm cho nhân viên.`
+        : `Bạn có chắc chắn muốn xóa đơn xin nghỉ phép này của nhân viên ${req.fullName || req.employeeCode}?`,
+      confirmText: 'Xác nhận xóa',
+      type: 'danger'
+    });
+    if (!confirmed) return;
+
+    try {
+      await requestsApi.deleteHrRequest(req.requestId);
+      toast.success(isAppr ? 'Đã xóa đơn và hoàn trả quỹ phép thành công!' : 'Đã xóa đơn nghỉ phép thành công!');
+      fetchApprovals();
+      if (activeTab === 'requests') {
+        fetchRequests();
+      }
+      if (activeTab === 'funds') {
+        fetchFunds();
+      }
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || 'Có lỗi xảy ra khi xóa đơn.');
+    }
+  };
+
+  const handleOpenEvidence = async (req: UserRequestItem) => {
+    setViewingEvidenceReq(req);
+    setLoadingEvidence(true);
+    setEvidenceAttachments([]);
+    try {
+      const res = await api.get<{ attachments: { attachmentId: number; originalFileName: string; fileSizeBytes: number; mimeType: string }[] }>(`/requests/${req.requestId}`);
+      const atts = res.data.attachments || [];
+      const loaded = await Promise.all(
+        atts.map(async (a) => {
+          try {
+            const imgRes = await api.get(`/attachments/${a.attachmentId}`, { responseType: 'blob' });
+            const url = URL.createObjectURL(imgRes.data);
+            return { id: a.attachmentId, name: a.originalFileName, url, size: a.fileSizeBytes };
+          } catch {
+            return { id: a.attachmentId, name: a.originalFileName, url: '', size: a.fileSizeBytes };
+          }
+        })
+      );
+      setEvidenceAttachments(loaded.filter(x => x.url));
+    } catch {
+      toast.error('Không thể tải tệp minh chứng.');
+    } finally {
+      setLoadingEvidence(false);
+    }
+  };
+
   // Fetch Funds
   const fetchFunds = async () => {
     if (!selectedCompany) return;
     setLoadingFunds(true);
     try {
+      const monthParam = fundMonth === 'ALL' ? '' : `&month=${fundMonth}`;
       const res = await api.get<LeaveFund[]>(
-        `/companies/${selectedCompany.id}/leave/funds?year=${fundYear}`
+        `/companies/${selectedCompany.id}/leave/funds?year=${fundYear}${monthParam}`
       );
       setFunds(res.data);
     } catch (err: any) {
@@ -193,7 +275,7 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
     } else {
       fetchFunds();
     }
-  }, [selectedCompany?.id, activeTab, reqFrom, reqTo, fundYear, approvalStatusFilter]);
+  }, [selectedCompany?.id, activeTab, reqFrom, reqTo, fundYear, fundMonth, approvalStatusFilter]);
 
   // Handle Save Request
   const handleSaveRequest = async (e: React.FormEvent) => {
@@ -617,20 +699,27 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                           </td>
                           <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
                             {req.attachmentCount > 0 ? (
-                              <span style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '3px',
-                                padding: '2px 6px',
-                                borderRadius: '4px',
-                                backgroundColor: '#EFF6FF',
-                                color: '#1D4ED8',
-                                fontSize: '11px',
-                                fontWeight: 600,
-                                whiteSpace: 'nowrap'
-                              }}>
-                                <Paperclip size={11} /> {req.attachmentCount}
-                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleOpenEvidence(req)}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  padding: '3px 8px',
+                                  borderRadius: '6px',
+                                  backgroundColor: '#EFF6FF',
+                                  color: '#1D4ED8',
+                                  border: '1px solid #BFDBFE',
+                                  fontSize: '11px',
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  whiteSpace: 'nowrap'
+                                }}
+                                title="Nhấp để xem hình ảnh minh chứng"
+                              >
+                                <Paperclip size={12} /> {req.attachmentCount} ảnh
+                              </button>
                             ) : (
                               <span style={{ color: '#94A3B8', fontSize: '12px' }}>—</span>
                             )}
@@ -710,7 +799,31 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                                 </button>
                               </div>
                             ) : (
-                              <span style={{ fontSize: '12px', color: '#94A3B8', whiteSpace: 'nowrap' }}>Đã hoàn tất</span>
+                              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteApprovalRequest(req)}
+                                  style={{
+                                    backgroundColor: '#FEF2F2',
+                                    color: '#DC2626',
+                                    border: '1px solid #FECACA',
+                                    borderRadius: '6px',
+                                    padding: '5px 10px',
+                                    fontSize: '12px',
+                                    fontWeight: 600,
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                    boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+                                    whiteSpace: 'nowrap'
+                                  }}
+                                  title={isApproved ? "Xóa đơn đã duyệt (Thu hồi ngày nghỉ và hoàn trả quỹ phép năm)" : "Xóa đơn này"}
+                                >
+                                  <Trash2 size={13} />
+                                  <span>Xóa</span>
+                                </button>
+                              </div>
                             )}
                           </td>
                         </tr>
@@ -747,23 +860,23 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '12px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <span style={{ fontSize: '13px', fontWeight: 600, color: '#64748b' }}>Từ ngày:</span>
-                  <input
-                    type="date"
-                    value={reqFrom}
-                    onChange={e => setReqFrom(e.target.value)}
-                    className="form-control form-control-sm"
-                    style={{ width: '145px' }}
-                  />
+                  <div style={{ width: '155px' }}>
+                    <DateInput
+                      value={reqFrom}
+                      onChange={val => setReqFrom(val)}
+                      className="form-control form-control-sm"
+                    />
+                  </div>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <span style={{ fontSize: '13px', fontWeight: 600, color: '#64748b' }}>Đến ngày:</span>
-                  <input
-                    type="date"
-                    value={reqTo}
-                    onChange={e => setReqTo(e.target.value)}
-                    className="form-control form-control-sm"
-                    style={{ width: '145px' }}
-                  />
+                  <div style={{ width: '155px' }}>
+                    <DateInput
+                      value={reqTo}
+                      onChange={val => setReqTo(val)}
+                      className="form-control form-control-sm"
+                    />
+                  </div>
                 </div>
                 <div style={{ position: 'relative', minWidth: '220px' }}>
                   <Search
@@ -910,13 +1023,40 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                   <input
                     type="number"
                     min={2020}
-                    max={2040}
+                    max={today.getFullYear()}
                     value={fundYear}
-                    onChange={e => setFundYear(Number(e.target.value))}
+                    onChange={e => {
+                      const y = Number(e.target.value);
+                      setFundYear(y);
+                      const curYear = today.getFullYear();
+                      const curMonth = today.getMonth() + 1;
+                      if (y >= curYear && fundMonth !== 'ALL' && fundMonth > curMonth) {
+                        setFundMonth(curMonth);
+                      }
+                    }}
                     className="form-control"
-                    style={{ width: '90px', padding: '6px 10px', fontSize: '13px', fontWeight: 600 }}
+                    style={{ width: '85px', padding: '6px 10px', fontSize: '13px', fontWeight: 600 }}
                   />
                 </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span style={{ fontSize: '13px', fontWeight: 600, color: '#64748b' }}>Lọc theo tháng:</span>
+                  <select
+                    value={fundMonth}
+                    onChange={e => setFundMonth(e.target.value === 'ALL' ? 'ALL' : Number(e.target.value))}
+                    className="form-control"
+                    style={{ minWidth: '150px', padding: '6px 10px', fontSize: '13px', fontWeight: 600 }}
+                  >
+                    <option value="ALL">-- Cả năm {fundYear} --</option>
+                    {Array.from(
+                      { length: fundYear >= today.getFullYear() ? today.getMonth() + 1 : 12 },
+                      (_, i) => i + 1
+                    ).map(m => (
+                      <option key={m} value={m}>Tháng {m}/{fundYear}</option>
+                    ))}
+                  </select>
+                </div>
+
                 <div style={{ position: 'relative', minWidth: '220px' }}>
                   <Search
                     size={15}
@@ -946,85 +1086,273 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                 </button>
               </div>
             </div>
+
+            {fundMonth !== 'ALL' && (
+              <div
+                style={{
+                  borderTop: '1px solid #E2E8F0',
+                  padding: '10px 1.25rem',
+                  backgroundColor: '#F0FDF4',
+                  fontSize: '12.5px',
+                  color: '#166534',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  fontWeight: 500
+                }}
+              >
+                <Calendar size={15} color="#16A34A" />
+                <span>
+                  Đang xem số dư quỹ phép tính đến <strong>Tháng {fundMonth}/{fundYear}</strong>: Phép năm đầu kỳ Tháng {fundMonth} bằng <strong>số phép tồn của Tháng {Number(fundMonth) > 1 ? Number(fundMonth) - 1 : 12} chuyển sang</strong>.
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Table of Funds */}
           <div className="table-container">
             <table className="table">
               <thead>
-                <tr>
-                  <th style={{ width: '110px' }}>Mã NV</th>
-                  <th>Họ và tên</th>
-                  <th style={{ textAlign: 'center', width: '120px' }}>Phép năm (Đầu kỳ)</th>
-                  <th style={{ textAlign: 'center', width: '120px' }}>Phép chuyển (Đầu kỳ)</th>
-                  <th style={{ textAlign: 'center', width: '110px' }}>Nghỉ bù (Đầu kỳ)</th>
-                  <th style={{ textAlign: 'center', width: '150px' }}>Đã trừ (Năm / Chuyển / Bù)</th>
-                  <th style={{ textAlign: 'center', width: '130px' }}>Tổng Còn lại</th>
-                  <th style={{ textAlign: 'right', width: '100px' }}>Thao tác</th>
-                </tr>
+                {fundMonth !== 'ALL' ? (
+                  <tr>
+                    <th style={{ width: '100px' }}>Mã NV</th>
+                    <th>Họ và tên</th>
+                    <th style={{ textAlign: 'center', width: '115px' }}>Phép năm (Đầu kỳ T{fundMonth})</th>
+                    <th style={{ textAlign: 'center', width: '115px', backgroundColor: '#F0FDF4' }}>Tích lũy (Trong T{fundMonth})</th>
+                    <th style={{ textAlign: 'center', width: '110px' }}>Tổng phép hưởng</th>
+                    <th style={{ textAlign: 'center', width: '125px', backgroundColor: '#FEF3C7', color: '#92400E' }}>Đã dùng trong T{fundMonth}</th>
+                    <th style={{ textAlign: 'center', width: '120px' }}>Dùng lũy kế (T1-T{fundMonth})</th>
+                    <th style={{ textAlign: 'center', width: '135px' }}>Tồn phép (Tại T{fundMonth})</th>
+                    <th style={{ textAlign: 'right', width: '90px' }}>Thao tác</th>
+                  </tr>
+                ) : (
+                  <tr>
+                    <th style={{ width: '100px' }}>Mã NV</th>
+                    <th>Họ và tên</th>
+                    <th style={{ textAlign: 'center', width: '100px' }}>Phép năm (Đầu kỳ)</th>
+                    <th style={{ textAlign: 'center', width: '110px', backgroundColor: '#F0FDF4' }}>Tích lũy (+1/tháng)</th>
+                    <th style={{ textAlign: 'center', width: '100px' }}>Tổng phép năm</th>
+                    <th style={{ textAlign: 'center', width: '90px' }}>Phép chuyển</th>
+                    <th style={{ textAlign: 'center', width: '90px' }}>Nghỉ bù</th>
+                    <th style={{ textAlign: 'center', width: '120px' }}>Đã sử dụng cả năm</th>
+                    <th style={{ textAlign: 'center', width: '130px' }}>Khả dụng (Còn lại)</th>
+                    <th style={{ textAlign: 'right', width: '90px' }}>Thao tác</th>
+                  </tr>
+                )}
               </thead>
               <tbody>
                 {loadingFunds ? (
                   <tr>
-                    <td colSpan={8} style={{ textAlign: 'center', padding: '3rem 1rem', color: '#64748b' }}>
+                    <td colSpan={10} style={{ textAlign: 'center', padding: '3rem 1rem', color: '#64748b' }}>
                       <RefreshCw size={24} className="animate-spin" style={{ margin: '0 auto 8px auto', display: 'block', color: '#2563eb' }} />
                       Đang tải số dư quỹ phép...
                     </td>
                   </tr>
                 ) : filteredFunds.length === 0 ? (
                   <tr>
-                    <td colSpan={8} style={{ textAlign: 'center', padding: '3rem 1rem', color: '#94a3b8' }}>
-                      Chưa có dữ liệu quỹ phép cho năm {fundYear}.
+                    <td colSpan={10} style={{ textAlign: 'center', padding: '3rem 1rem', color: '#94a3b8' }}>
+                      Chưa có dữ liệu quỹ phép cho {fundMonth !== 'ALL' ? `Tháng ${fundMonth}/${fundYear}` : `năm ${fundYear}`}.
                     </td>
                   </tr>
                 ) : (
-                  filteredFunds.map(f => (
-                    <tr key={f.employeeId}>
-                      <td style={{ fontWeight: 700, color: '#1e40af', fontFamily: 'monospace' }}>
-                        {f.employeeCode}
-                      </td>
-                      <td style={{ fontWeight: 600 }}>{f.fullName}</td>
-                      <td style={{ textAlign: 'center', fontWeight: 600 }}>{f.annualOpening}</td>
-                      <td style={{ textAlign: 'center', fontWeight: 600 }}>{f.carryOpening}</td>
-                      <td style={{ textAlign: 'center', fontWeight: 600 }}>{f.compOpening}</td>
-                      <td style={{ textAlign: 'center', fontSize: '12px', color: '#e11d48', fontFamily: 'monospace' }}>
-                        -{f.annualUsed} / -{f.carryUsed} / -{f.compUsed}
-                      </td>
-                      <td style={{ textAlign: 'center' }}>
-                        <span
-                          className={`badge ${f.totalRemaining > 0 ? 'badge-success' : 'badge-neutral'}`}
-                          style={{ fontSize: '12px', padding: '3px 8px' }}
-                        >
-                          {f.totalRemaining.toFixed(1)} ngày
-                        </span>
-                      </td>
-                      <td style={{ textAlign: 'right' }}>
-                        <div style={{ display: 'inline-flex', gap: '4px' }}>
-                          <button
-                            onClick={() => {
-                              setEditingFund(f);
-                              setAnnualOpening(f.annualOpening);
-                              setCarryOpening(f.carryOpening);
-                              setCompOpening(f.compOpening);
-                            }}
-                            className="btn btn-sm btn-secondary"
-                            style={{ padding: '4px 6px' }}
-                            title="Hiệu chỉnh số dư đầu kỳ"
+                  filteredFunds.map(f => {
+                    const opening = f.annualOpening + (f.carryOpening || 0);
+                    const accrued = f.accrued ?? 0;
+                    const totalAnnual = f.totalAnnualEarned ?? (opening + accrued);
+                    const available = f.availableBalance ?? f.totalRemaining ?? 0;
+                    const isExhausted = f.isExhausted ?? (available <= 0);
+
+                    if (fundMonth !== 'ALL') {
+                      const isAfterFirstMonth = Number(fundMonth) > 1;
+                      const displayOpening = isAfterFirstMonth ? f.annualOpening : opening;
+
+                      return (
+                        <tr key={f.employeeId} style={{ backgroundColor: isExhausted ? '#FEF2F2' : undefined }}>
+                          <td style={{ fontWeight: 700, color: '#1e40af', fontFamily: 'monospace' }}>
+                            {f.employeeCode}
+                          </td>
+                          <td style={{ fontWeight: 600 }}>{f.fullName}</td>
+                          <td style={{ textAlign: 'center', fontWeight: 600 }}>
+                            <div style={{ fontSize: '13.5px', fontWeight: 700 }}>{displayOpening}</div>
+                            {isAfterFirstMonth ? (
+                              <div style={{ fontSize: '10.5px', color: '#0369A1', fontWeight: 600 }}>
+                                (Tồn T{Number(fundMonth) - 1})
+                              </div>
+                            ) : (
+                              f.carryOpening > 0 && (
+                                <div style={{ fontSize: '10px', color: '#64748b' }}>
+                                  ({f.annualOpening} + {f.carryOpening} chuyển)
+                                </div>
+                              )
+                            )}
+                          </td>
+                          <td style={{ textAlign: 'center', backgroundColor: '#F0FDF4' }}>
+                            <span
+                              className="badge badge-success"
+                              style={{ fontSize: '12px', padding: '2px 8px', fontWeight: 700 }}
+                              title={`Tích lũy tính đến hết Tháng ${fundMonth}/${fundYear}`}
+                            >
+                              +{accrued}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: 'center', fontWeight: 700, color: '#0369A1' }}>
+                            {totalAnnual}
+                          </td>
+                          <td style={{ textAlign: 'center', backgroundColor: '#FFFBEB' }}>
+                            {f.monthUsed != null && f.monthUsed > 0 ? (
+                              <span
+                                className="badge"
+                                style={{
+                                  backgroundColor: '#FEF3C7',
+                                  color: '#B45309',
+                                  border: '1px solid #FCD34D',
+                                  fontWeight: 700,
+                                  fontSize: '12px',
+                                  padding: '2px 8px'
+                                }}
+                                title={`Đã sử dụng ${f.monthUsed} ngày phép trong Tháng ${fundMonth}/${fundYear}`}
+                              >
+                                {f.monthUsed} ngày
+                              </span>
+                            ) : (
+                              <span style={{ color: '#94A3B8', fontSize: '12px' }}>0</span>
+                            )}
+                          </td>
+                          <td style={{ textAlign: 'center', fontSize: '12px', color: '#e11d48', fontWeight: 700, fontFamily: 'monospace' }}>
+                            -{f.totalUsed}
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            {isExhausted ? (
+                              <span
+                                className="badge"
+                                style={{
+                                  backgroundColor: '#FEE2E2',
+                                  color: '#991B1B',
+                                  border: '1px solid #F87171',
+                                  fontSize: '12px',
+                                  padding: '3px 8px',
+                                  fontWeight: 700
+                                }}
+                                title={`Tại thời điểm Tháng ${fundMonth}/${fundYear}, nhân viên đã dùng hết phép`}
+                              >
+                                ⚠️ Hết phép (0)
+                              </span>
+                            ) : (
+                              <span
+                                className="badge badge-success"
+                                style={{ fontSize: '12px', padding: '3px 8px', fontWeight: 700 }}
+                                title={`Số ngày phép năm còn tồn tính đến hết Tháng ${fundMonth}/${fundYear}`}
+                              >
+                                {available.toFixed(1)} ngày
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ textAlign: 'right' }}>
+                            <div style={{ display: 'inline-flex', gap: '4px' }}>
+                              <button
+                                onClick={() => {
+                                  setEditingFund(f);
+                                  setAnnualOpening(f.annualOpening);
+                                  setCarryOpening(f.carryOpening);
+                                  setCompOpening(f.compOpening);
+                                }}
+                                className="btn btn-sm btn-secondary"
+                                style={{ padding: '4px 6px' }}
+                                title="Hiệu chỉnh số dư đầu kỳ"
+                              >
+                                <Edit2 size={13} />
+                              </button>
+                              <button
+                                onClick={() => handleViewLedger(f)}
+                                className="btn btn-sm btn-secondary"
+                                style={{ padding: '4px 6px', color: '#d97706' }}
+                                title="Xem sổ cái chi tiết"
+                              >
+                                <History size={13} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return (
+                      <tr key={f.employeeId} style={{ backgroundColor: isExhausted ? '#FEF2F2' : undefined }}>
+                        <td style={{ fontWeight: 700, color: '#1e40af', fontFamily: 'monospace' }}>
+                          {f.employeeCode}
+                        </td>
+                        <td style={{ fontWeight: 600 }}>{f.fullName}</td>
+                        <td style={{ textAlign: 'center', fontWeight: 600 }}>{f.annualOpening}</td>
+                        <td style={{ textAlign: 'center', backgroundColor: '#F0FDF4' }}>
+                          <span
+                            className="badge badge-success"
+                            style={{ fontSize: '12px', padding: '2px 8px', fontWeight: 700 }}
+                            title="Tích lũy +1 ngày mỗi tháng đạt đủ 14 công khi chốt kỳ"
                           >
-                            <Edit2 size={13} />
-                          </button>
-                          <button
-                            onClick={() => handleViewLedger(f)}
-                            className="btn btn-sm btn-secondary"
-                            style={{ padding: '4px 6px', color: '#d97706' }}
-                            title="Xem sổ cái chi tiết"
-                          >
-                            <History size={13} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
+                            +{accrued}
+                          </span>
+                        </td>
+                        <td style={{ textAlign: 'center', fontWeight: 700, color: '#0369A1' }}>
+                          {totalAnnual}
+                        </td>
+                        <td style={{ textAlign: 'center', fontWeight: 600 }}>{f.carryOpening}</td>
+                        <td style={{ textAlign: 'center', fontWeight: 600 }}>{f.compOpening}</td>
+                        <td style={{ textAlign: 'center', fontSize: '12px', color: '#e11d48', fontWeight: 700, fontFamily: 'monospace' }}>
+                          -{f.totalUsed}
+                        </td>
+                        <td style={{ textAlign: 'center' }}>
+                          {isExhausted ? (
+                            <span
+                              className="badge"
+                              style={{
+                                backgroundColor: '#FEE2E2',
+                                color: '#991B1B',
+                                border: '1px solid #F87171',
+                                fontSize: '12px',
+                                padding: '3px 8px',
+                                fontWeight: 700
+                              }}
+                              title="Nhân viên đã dùng hết phép năm, không thể nghỉ phép năm nữa"
+                            >
+                              ⚠️ Hết phép (0)
+                            </span>
+                          ) : (
+                            <span
+                              className="badge badge-success"
+                              style={{ fontSize: '12px', padding: '3px 8px', fontWeight: 700 }}
+                            >
+                              {available.toFixed(1)} ngày
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
+                          <div style={{ display: 'inline-flex', gap: '4px' }}>
+                            <button
+                              onClick={() => {
+                                setEditingFund(f);
+                                setAnnualOpening(f.annualOpening);
+                                setCarryOpening(f.carryOpening);
+                                setCompOpening(f.compOpening);
+                              }}
+                              className="btn btn-sm btn-secondary"
+                              style={{ padding: '4px 6px' }}
+                              title="Hiệu chỉnh số dư đầu kỳ"
+                            >
+                              <Edit2 size={13} />
+                            </button>
+                            <button
+                              onClick={() => handleViewLedger(f)}
+                              className="btn btn-sm btn-secondary"
+                              style={{ padding: '4px 6px', color: '#d97706' }}
+                              title="Xem sổ cái chi tiết"
+                            >
+                              <History size={13} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -1073,12 +1401,10 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                   <label className="form-label" style={{ fontWeight: 600, fontSize: '13px' }}>
                     Ngày nghỉ <span style={{ color: '#e11d48' }}>*</span>
                   </label>
-                  <input
-                    type="date"
+                  <DateInput
                     required
                     value={reqDate}
-                    onChange={e => setReqDate(e.target.value)}
-                    className="form-control"
+                    onChange={val => setReqDate(val)}
                   />
                 </div>
 
@@ -1382,18 +1708,22 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                           </td>
                           <td>
                             <span
-                              className={`badge ${item.fund === 'ANNUAL'
-                                ? 'badge-primary'
-                                : item.fund === 'CARRY'
-                                  ? 'badge-warning'
-                                  : 'badge-neutral'
+                              className={`badge ${item.amount > 0
+                                ? 'badge-success'
+                                : item.fund === 'ANNUAL'
+                                  ? 'badge-primary'
+                                  : item.fund === 'CARRY'
+                                    ? 'badge-warning'
+                                    : 'badge-neutral'
                                 }`}
                             >
-                              {item.fund === 'ANNUAL'
-                                ? 'Phép năm'
-                                : item.fund === 'CARRY'
-                                  ? 'Phép chuyển'
-                                  : 'Nghỉ bù'}
+                              {item.amount > 0
+                                ? '★ Tích lũy (+1)'
+                                : item.fund === 'ANNUAL'
+                                  ? 'Phép năm'
+                                  : item.fund === 'CARRY'
+                                    ? 'Phép chuyển'
+                                    : 'Nghỉ bù'}
                             </span>
                           </td>
                           <td
@@ -1409,8 +1739,8 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                           <td style={{ textAlign: 'right', fontWeight: 700, fontFamily: 'monospace' }}>
                             {item.balanceAfter}
                           </td>
-                          <td style={{ fontSize: '12px', color: '#64748b' }}>
-                            {item.reason || '-'}
+                          <td style={{ fontSize: '12px', color: '#475569' }}>
+                            {item.note || item.reason || (item.code === 'ACCRUAL' ? 'Cộng 1 ngày phép năm do làm việc đủ >= 14 ngày công' : '-')}
                           </td>
                         </tr>
                       ))}
@@ -1433,20 +1763,55 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
         </div>
       )}
 
-      {/* MODAL: XÁC NHẬN PHÊ DUYỆT HOẶC TỪ CHỐI ĐƠN */}
+      {/* MODAL: XÁC NHẬN PHÊ DUYỆT HOẶC TỪ CHỐI ĐƠN (POPUP MODAL) */}
       {selectedRequestForDecision && decisionAction && (
-        <div className="modal-backdrop">
-          <div className="modal" style={{ maxWidth: '480px' }}>
-            <div className="modal-header">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        <div
+          className="modal-overlay"
+          style={{ zIndex: 1050 }}
+          onClick={() => {
+            setSelectedRequestForDecision(null);
+            setDecisionAction(null);
+          }}
+        >
+          <div
+            className="modal-content"
+            style={{ maxWidth: '520px', borderRadius: '14px', border: '1px solid #E2E8F0', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="modal-header"
+              style={{
+                backgroundColor: decisionAction === 'APPROVE' ? '#F0FDF4' : '#FEF2F2',
+                borderBottom: `1px solid ${decisionAction === 'APPROVE' ? '#BBF7D0' : '#FECACA'}`,
+                padding: '16px 20px'
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 {decisionAction === 'APPROVE' ? (
-                  <CheckCircle2 size={20} color="#16A34A" />
+                  <div style={{ width: 36, height: 36, borderRadius: '50%', backgroundColor: '#DCFCE7', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <CheckCircle2 size={22} color="#16A34A" />
+                  </div>
                 ) : (
-                  <XCircle size={20} color="#DC2626" />
+                  <div style={{ width: 36, height: 36, borderRadius: '50%', backgroundColor: '#FEE2E2', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <XCircle size={22} color="#DC2626" />
+                  </div>
                 )}
-                <h3 className="modal-title" style={{ color: decisionAction === 'APPROVE' ? '#166534' : '#991B1B' }}>
-                  {decisionAction === 'APPROVE' ? 'Xác Nhận Phê Duyệt Đơn' : 'Từ Chối Đơn Nghỉ Phép'}
-                </h3>
+                <div>
+                  <h3
+                    className="modal-title"
+                    style={{
+                      color: decisionAction === 'APPROVE' ? '#166534' : '#991B1B',
+                      fontSize: '16px',
+                      fontWeight: 800,
+                      margin: 0
+                    }}
+                  >
+                    {decisionAction === 'APPROVE' ? 'Xác Nhận Phê Duyệt Đơn Nghỉ Phép' : 'Từ Chối Đơn Nghỉ Phép'}
+                  </h3>
+                  <div style={{ fontSize: '12px', color: '#64748B', marginTop: '2px' }}>
+                    Mã đơn: #{selectedRequestForDecision.requestId} • {selectedRequestForDecision.fullName || selectedRequestForDecision.employeeCode}
+                  </div>
+                </div>
               </div>
               <button
                 type="button"
@@ -1455,41 +1820,103 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                   setDecisionAction(null);
                 }}
                 className="btn-close"
+                title="Đóng (ESC)"
               >
                 <X size={18} />
               </button>
             </div>
 
-            <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <div style={{
-                backgroundColor: '#F8FAFC',
-                border: '1px solid #E2E8F0',
-                borderRadius: '8px',
-                padding: '12px 14px',
-                fontSize: '13px'
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                  <span style={{ color: '#64748B' }}>Nhân viên:</span>
-                  <strong style={{ color: '#0F172A' }}>
-                    {selectedRequestForDecision.fullName || selectedRequestForDecision.employeeCode} ({selectedRequestForDecision.employeeCode})
+            <div className="modal-body" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div
+                style={{
+                  backgroundColor: '#F8FAFC',
+                  border: '1px solid #E2E8F0',
+                  borderRadius: '10px',
+                  padding: '14px 16px',
+                  fontSize: '13px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ color: '#64748B', fontSize: '12px' }}>Nhân viên:</span>
+                  <strong style={{ color: '#0F172A', fontSize: '13px' }}>
+                    {selectedRequestForDecision.fullName || selectedRequestForDecision.employeeCode}{' '}
+                    <span style={{ color: '#0056B3', fontFamily: 'monospace' }}>({selectedRequestForDecision.employeeCode})</span>
                   </strong>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                  <span style={{ color: '#64748B' }}>Thời gian nghỉ:</span>
-                  <span style={{ fontWeight: 600, color: '#0056B3' }}>
-                    {selectedRequestForDecision.fromDate} → {selectedRequestForDecision.toDate} ({selectedRequestForDecision.daysRequested} ngày)
+
+                {selectedRequestForDecision.departmentName && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ color: '#64748B', fontSize: '12px' }}>Phòng ban:</span>
+                    <span style={{ color: '#334155', fontWeight: 600 }}>{selectedRequestForDecision.departmentName}</span>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ color: '#64748B', fontSize: '12px' }}>Thời gian xin nghỉ:</span>
+                  <span style={{ fontWeight: 700, color: '#0056B3' }}>
+                    {selectedRequestForDecision.fromDate}{selectedRequestForDecision.fromDate !== selectedRequestForDecision.toDate ? ` → ${selectedRequestForDecision.toDate}` : ''}
+                    <span style={{ color: '#16A34A', marginLeft: '6px' }}>({selectedRequestForDecision.daysRequested} ngày)</span>
                   </span>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                  <span style={{ color: '#64748B' }}>Lý do:</span>
-                  <span style={{ color: '#334155', fontStyle: 'italic' }}>
+
+                {selectedRequestForDecision.dayPart && selectedRequestForDecision.dayPart !== 'FULL' && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ color: '#64748B', fontSize: '12px' }}>Buổi nghỉ:</span>
+                    <span style={{ color: '#D97706', fontWeight: 700 }}>
+                      {selectedRequestForDecision.dayPart === 'MORNING' ? 'Buổi sáng' : 'Buổi chiều'}
+                    </span>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px' }}>
+                  <span style={{ color: '#64748B', fontSize: '12px', whiteSpace: 'nowrap' }}>Lý do xin nghỉ:</span>
+                  <span style={{ color: '#334155', fontStyle: 'italic', textAlign: 'right' }}>
                     "{selectedRequestForDecision.reason || 'Không ghi chú'}"
                   </span>
                 </div>
+
+                {selectedRequestForDecision.attachmentCount > 0 && (
+                  <div
+                    style={{
+                      marginTop: '4px',
+                      paddingTop: '10px',
+                      borderTop: '1px dashed #CBD5E1',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between'
+                    }}
+                  >
+                    <span style={{ color: '#1D4ED8', fontWeight: 700, fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <Paperclip size={14} /> Có {selectedRequestForDecision.attachmentCount} ảnh minh chứng đính kèm
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleOpenEvidence(selectedRequestForDecision)}
+                      style={{
+                        backgroundColor: '#EFF6FF',
+                        color: '#1D4ED8',
+                        border: '1px solid #BFDBFE',
+                        borderRadius: '6px',
+                        padding: '4px 10px',
+                        fontSize: '11px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '4px'
+                      }}
+                    >
+                      <Eye size={12} /> Xem ảnh minh chứng
+                    </button>
+                  </div>
+                )}
               </div>
 
               <div>
-                <label className="form-label" style={{ fontSize: '13px', fontWeight: 600, color: '#334155' }}>
+                <label className="form-label" style={{ fontSize: '13px', fontWeight: 700, color: '#334155', marginBottom: '6px', display: 'block' }}>
                   Ghi chú phản hồi của HCNS:
                 </label>
                 <textarea
@@ -1497,12 +1924,30 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                   rows={3}
                   value={decisionNote}
                   onChange={e => setDecisionNote(e.target.value)}
-                  placeholder={decisionAction === 'APPROVE' ? 'Nhập ghi chú duyệt (tùy chọn)...' : 'Nhập lý do từ chối đơn...'}
+                  placeholder={decisionAction === 'APPROVE' ? 'Ghi chú duyệt (mặc định: Đã duyệt)...' : 'Nhập lý do từ chối để nhân viên nắm rõ...'}
+                  style={{
+                    borderRadius: '8px',
+                    border: '1px solid #CBD5E1',
+                    padding: '8px 12px',
+                    fontSize: '13px',
+                    width: '100%',
+                    resize: 'vertical'
+                  }}
                 />
               </div>
             </div>
 
-            <div className="modal-footer">
+            <div
+              className="modal-footer"
+              style={{
+                backgroundColor: '#F8FAFC',
+                borderTop: '1px solid #E2E8F0',
+                padding: '14px 20px',
+                display: 'flex',
+                justifyContent: 'flex-end',
+                gap: '10px'
+              }}
+            >
               <button
                 type="button"
                 onClick={() => {
@@ -1511,20 +1956,27 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                 }}
                 disabled={processingDecision}
                 className="btn btn-secondary"
+                style={{ padding: '8px 16px', fontSize: '13px', fontWeight: 600, borderRadius: '8px' }}
               >
-                Hủy
+                Hủy bỏ
               </button>
               <button
                 type="button"
                 onClick={handleConfirmDecision}
                 disabled={processingDecision}
-                className={`btn ${decisionAction === 'APPROVE' ? 'btn-primary' : 'btn-danger'}`}
                 style={{
                   backgroundColor: decisionAction === 'APPROVE' ? '#16A34A' : '#DC2626',
-                  borderColor: decisionAction === 'APPROVE' ? '#16A34A' : '#DC2626',
-                  display: 'flex',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  borderRadius: '8px',
+                  padding: '8px 20px',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  cursor: processingDecision ? 'wait' : 'pointer',
+                  display: 'inline-flex',
                   alignItems: 'center',
-                  gap: '6px'
+                  gap: '6px',
+                  boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
                 }}
               >
                 {processingDecision ? (
@@ -1542,6 +1994,323 @@ export const LeaveManager: React.FC<LeaveManagerProps> = () => {
                       : 'Xác nhận Từ Chối'}
                 </span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: XEM ẢNH MINH CHỨNG (POPUP MODAL) */}
+      {viewingEvidenceReq && (
+        <div
+          className="modal-overlay"
+          style={{ zIndex: 1100 }}
+          onClick={() => setViewingEvidenceReq(null)}
+        >
+          <div
+            className="modal-content"
+            style={{ maxWidth: '680px', borderRadius: '14px', border: '1px solid #E2E8F0', boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="modal-header"
+              style={{
+                backgroundColor: '#F8FAFC',
+                borderBottom: '1px solid #E2E8F0',
+                padding: '16px 20px'
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{ width: 34, height: 34, borderRadius: '50%', backgroundColor: '#EFF6FF', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <Paperclip size={18} color="#0056B3" />
+                </div>
+                <div>
+                  <h3 className="modal-title" style={{ fontSize: '15px', fontWeight: 800, color: '#1E293B', margin: 0 }}>
+                    Ảnh Minh Chứng Nghỉ Phép
+                  </h3>
+                  <div style={{ fontSize: '12px', color: '#64748B', marginTop: '2px' }}>
+                    {viewingEvidenceReq.fullName || viewingEvidenceReq.employeeCode} ({viewingEvidenceReq.employeeCode}) • Ngày nghỉ: {viewingEvidenceReq.fromDate}{viewingEvidenceReq.toDate !== viewingEvidenceReq.fromDate ? ` → ${viewingEvidenceReq.toDate}` : ''}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingEvidenceReq(null)}
+                className="btn-close"
+                title="Đóng"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="modal-body" style={{ padding: '20px', maxHeight: '72vh', overflowY: 'auto' }}>
+              <div
+                style={{
+                  backgroundColor: '#EFF6FF',
+                  border: '1px solid #BFDBFE',
+                  borderRadius: '8px',
+                  padding: '10px 14px',
+                  fontSize: '12px',
+                  color: '#1E40AF',
+                  marginBottom: '16px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px'
+                }}
+              >
+                <Eye size={15} />
+                <span>Nhấp trực tiếp vào hình ảnh hoặc nút <strong>Phóng to</strong> để xem chi tiết ảnh ở chế độ toàn màn hình.</span>
+              </div>
+
+              {loadingEvidence ? (
+                <div style={{ textAlign: 'center', padding: '40px', color: '#64748B' }}>
+                  <RefreshCw size={24} className="animate-spin" style={{ margin: '0 auto 8px auto', display: 'block', color: '#0056B3' }} />
+                  Đang tải hình ảnh minh chứng WebP...
+                </div>
+              ) : evidenceAttachments.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '40px', color: '#94A3B8' }}>
+                  Không tìm thấy hình ảnh minh chứng nào cho đơn này.
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                  {evidenceAttachments.map((att, idx) => (
+                    <div
+                      key={att.id}
+                      style={{
+                        border: '1px solid #E2E8F0',
+                        borderRadius: '10px',
+                        overflow: 'hidden',
+                        backgroundColor: '#F8FAFC',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+                      }}
+                    >
+                      <div
+                        style={{
+                          padding: '10px 14px',
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          backgroundColor: '#F1F5F9',
+                          borderBottom: '1px solid #E2E8F0',
+                          fontSize: '12px'
+                        }}
+                      >
+                        <span style={{ fontWeight: 700, color: '#334155' }}>
+                          Ảnh #{idx + 1}: {att.name}
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <button
+                            type="button"
+                            onClick={() => setLightboxImage({ url: att.url, name: att.name })}
+                            style={{
+                              backgroundColor: '#EFF6FF',
+                              color: '#0056B3',
+                              border: '1px solid #BFDBFE',
+                              padding: '4px 10px',
+                              borderRadius: '6px',
+                              fontSize: '11px',
+                              fontWeight: 700,
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px'
+                            }}
+                            title="Xem ảnh phóng to toàn màn hình"
+                          >
+                            <Eye size={12} /> Phóng to
+                          </button>
+                          <a
+                            href={att.url}
+                            download={att.name}
+                            style={{
+                              color: '#475569',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              textDecoration: 'none',
+                              fontSize: '11px',
+                              fontWeight: 600
+                            }}
+                            title="Tải ảnh gốc về máy"
+                          >
+                            <Download size={12} /> Tải về
+                          </a>
+                        </div>
+                      </div>
+                      <div
+                        style={{
+                          padding: '14px',
+                          textAlign: 'center',
+                          cursor: 'zoom-in',
+                          backgroundColor: '#FFFFFF'
+                        }}
+                        onClick={() => setLightboxImage({ url: att.url, name: att.name })}
+                        title="Bấm để xem ảnh phóng to"
+                      >
+                        <img
+                          src={att.url}
+                          alt={att.name}
+                          style={{
+                            maxWidth: '100%',
+                            maxHeight: '380px',
+                            objectFit: 'contain',
+                            borderRadius: '8px',
+                            boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                            transition: 'transform 0.15s ease'
+                          }}
+                          onMouseEnter={(e) => { e.currentTarget.style.transform = 'scale(1.02)'; }}
+                          onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div
+              className="modal-footer"
+              style={{
+                backgroundColor: '#F8FAFC',
+                borderTop: '1px solid #E2E8F0',
+                padding: '14px 20px',
+                display: 'flex',
+                justifyContent: 'flex-end'
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => setViewingEvidenceReq(null)}
+                className="btn btn-secondary"
+                style={{ padding: '8px 16px', fontSize: '13px', fontWeight: 600, borderRadius: '8px' }}
+              >
+                Đóng
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: XEM ẢNH PHÓNG TO (LIGHTBOX POPUP MODAL TOÀN MÀN HÌNH) */}
+      {lightboxImage && (
+        <div
+          className="modal-overlay"
+          style={{
+            zIndex: 1200,
+            backgroundColor: 'rgba(15, 23, 42, 0.88)',
+            backdropFilter: 'blur(5px)',
+            padding: '20px'
+          }}
+          onClick={() => setLightboxImage(null)}
+        >
+          <div
+            className="modal-content"
+            style={{
+              maxWidth: '92vw',
+              maxHeight: '94vh',
+              backgroundColor: '#0F172A',
+              color: '#FFF',
+              border: '1px solid rgba(255, 255, 255, 0.15)',
+              borderRadius: '14px',
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header Lightbox */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '12px 20px',
+                borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+                backgroundColor: '#1E293B'
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <Eye size={18} color="#60A5FA" />
+                <span
+                  style={{
+                    fontWeight: 700,
+                    fontSize: '14px',
+                    color: '#F8FAFC',
+                    maxWidth: '60vw',
+                    textOverflow: 'ellipsis',
+                    overflow: 'hidden',
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  {lightboxImage.name}
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <a
+                  href={lightboxImage.url}
+                  download={lightboxImage.name}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '6px 12px',
+                    borderRadius: '6px',
+                    backgroundColor: '#0284C7',
+                    color: '#FFFFFF',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    textDecoration: 'none',
+                    cursor: 'pointer'
+                  }}
+                  title="Tải ảnh về máy"
+                >
+                  <Download size={14} /> Tải ảnh
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setLightboxImage(null)}
+                  style={{
+                    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+                    border: 'none',
+                    borderRadius: '6px',
+                    color: '#F8FAFC',
+                    width: '32px',
+                    height: '32px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: 'pointer'
+                  }}
+                  title="Đóng (ESC)"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            {/* Body Lightbox */}
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '16px',
+                overflow: 'auto',
+                backgroundColor: '#020617'
+              }}
+            >
+              <img
+                src={lightboxImage.url}
+                alt={lightboxImage.name}
+                style={{
+                  maxWidth: '100%',
+                  maxHeight: '80vh',
+                  objectFit: 'contain',
+                  borderRadius: '8px',
+                  boxShadow: '0 10px 30px rgba(0,0,0,0.5)'
+                }}
+              />
             </div>
           </div>
         </div>

@@ -16,12 +16,14 @@ public class ProfileController : ControllerBase
     private readonly AppDbContext _db;
     private readonly IEmployeeRequestService _requestService;
     private readonly IDeviceService _deviceService;
+    private readonly ILeaveService _leaveService;
 
-    public ProfileController(AppDbContext db, IEmployeeRequestService requestService, IDeviceService deviceService)
+    public ProfileController(AppDbContext db, IEmployeeRequestService requestService, IDeviceService deviceService, ILeaveService leaveService)
     {
         _db = db;
         _requestService = requestService;
         _deviceService = deviceService;
+        _leaveService = leaveService;
     }
 
     /// <summary>Lấy thông tin hồ sơ cá nhân đầy đủ (Hội sở chính/phụ, ca làm việc, 2 khe thiết bị).</summary>
@@ -124,44 +126,20 @@ public class ProfileController : ControllerBase
         if (emp == null) return Ok(new { available = 0 });
 
         int year = DateTime.Today.Year;
-        var fund = await _db.LeaveFunds.AsNoTracking().FirstOrDefaultAsync(f => f.EmployeeId == emp.Id && f.Year == year, ct);
-
-        decimal annualOpening = fund?.AnnualOpening ?? 12m;
-        decimal carryOpening = fund?.CarryOpening ?? 0m;
-        decimal compOpening = fund?.CompOpening ?? 0m;
-
-        var ledgerDeducted = await _db.LeaveLedger
-            .AsNoTracking()
-            .Where(l => l.EmployeeId == emp.Id && l.Year == year)
-            .SumAsync(l => (decimal?)l.Amount, ct) ?? 0m;
-
-        var heldDaysQuery = _db.EmployeeRequests
-            .AsNoTracking()
-            .Where(r => r.EmployeeCode == user.EmployeeCode &&
-                        r.RequestType == "LEAVE" &&
-                        r.Status == "PENDING_HR" &&
-                        r.FromDate.Year == year);
-
-        if (emp.CompanyId > 0)
-        {
-            heldDaysQuery = heldDaysQuery.Where(r => r.CompanyId == emp.CompanyId || r.CompanyId == null);
-        }
-
-        var heldDays = await heldDaysQuery.SumAsync(r => (decimal?)r.DaysRequested, ct) ?? 0m;
-
-        decimal totalOpening = annualOpening + carryOpening + compOpening;
-        decimal available = Math.Max(0m, totalOpening - ledgerDeducted - heldDays);
+        var b = await _leaveService.GetEmployeeLeaveBalanceAsync(emp.Id, year, ct);
 
         return Ok(new
         {
             year,
-            annualOpening,
-            carryOpening,
-            compOpening,
-            totalOpening,
-            used = ledgerDeducted,
-            held = heldDays,
-            available
+            annualOpening = b.AnnualOpening,
+            accrued = b.Accrued,
+            carryOpening = b.CarryOpening,
+            compOpening = b.CompOpening,
+            totalEarned = b.TotalAnnualEarned,
+            used = b.TotalUsed,
+            held = b.PendingDays,
+            available = b.AvailableBalance,
+            isExhausted = b.IsExhausted
         });
     }
 }

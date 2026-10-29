@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using ChamCong.Api.Data;
 using ChamCong.Api.Infrastructure;
 using ChamCong.Api.Services;
@@ -36,6 +37,10 @@ public class RequestsController : ControllerBase
             return BadRequest(new { code = "NO_EMPLOYEE", message = "Tài khoản chưa liên kết nhân viên." });
         }
 
+        var files = (form.Files != null && form.Files.Count > 0)
+            ? form.Files
+            : Request.Form.Files.ToList();
+
         var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
         var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
         if (primaryCompanyId.HasValue)
@@ -54,7 +59,7 @@ public class RequestsController : ControllerBase
                 ToDate = form.ToDate,
                 DayPart = form.DayPart,
                 Reason = form.Reason ?? "",
-                Files = form.Files
+                Files = files
             };
             var req = await _requestService.SubmitLeaveRequestAsync(user.EmployeeCode, dto, companyId, ct);
             _audit.Log("Request", req.RequestId, "SubmitLeave", form.Reason);
@@ -74,11 +79,75 @@ public class RequestsController : ControllerBase
                 ActualTimeOut = actualOut,
                 ReasonCode = form.ReasonCode,
                 Reason = form.Reason ?? "",
-                Files = form.Files
+                Files = files
             };
             var req = await _requestService.SubmitRegularizationRequestAsync(user.EmployeeCode, dto, companyId, ct);
             _audit.Log("Request", req.RequestId, "SubmitRegularization", form.Reason);
             return Ok(new { req.RequestId, message = "Đã gửi giải trình chấm công thành công." });
+        }
+
+        return BadRequest(new { code = "INVALID_TYPE", message = "Loại yêu cầu chỉ chấp nhận LEAVE hoặc REGULARIZATION." });
+    }
+
+    /// <summary>Cập nhật đơn (Nghỉ phép hoặc Giải trình) khi đang chờ duyệt PENDING_HR.</summary>
+    [HttpPut("{id}")]
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> UpdateRequest(int id, [FromForm] SubmitRequestForm form, CancellationToken ct)
+    {
+        var uid = User.UserId();
+        var user = await _db.Users.AsNoTracking().Include(u => u.Companies).FirstOrDefaultAsync(u => u.Id == uid, ct);
+        if (user == null || string.IsNullOrWhiteSpace(user.EmployeeCode))
+        {
+            return BadRequest(new { code = "NO_EMPLOYEE", message = "Tài khoản chưa liên kết nhân viên." });
+        }
+
+        var files = (form.Files != null && form.Files.Count > 0)
+            ? form.Files
+            : Request.Form.Files.ToList();
+
+        var primaryCompanyId = user.Companies.FirstOrDefault()?.CompanyId;
+        var empQuery = _db.Employees.AsNoTracking().Where(e => e.EmployeeCode == user.EmployeeCode);
+        if (primaryCompanyId.HasValue)
+        {
+            empQuery = empQuery.Where(e => e.CompanyId == primaryCompanyId.Value);
+        }
+        var emp = await empQuery.FirstOrDefaultAsync(ct);
+        int? companyId = emp?.CompanyId ?? primaryCompanyId;
+
+        if (form.RequestType?.Equals("LEAVE", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            var dto = new CreateLeaveDto
+            {
+                LeaveCode = form.LeaveCode ?? "P",
+                FromDate = form.FromDate,
+                ToDate = form.ToDate,
+                DayPart = form.DayPart,
+                Reason = form.Reason ?? "",
+                Files = files
+            };
+            var req = await _requestService.UpdateLeaveRequestAsync(id, user.EmployeeCode, dto, companyId, ct);
+            _audit.Log("Request", req.RequestId, "UpdateLeave", form.Reason);
+            return Ok(new { req.RequestId, message = "Đã cập nhật đơn nghỉ phép thành công." });
+        }
+        else if (form.RequestType?.Equals("REGULARIZATION", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            if (!TimeSpan.TryParse(form.ActualIn, out var actualIn) || !TimeSpan.TryParse(form.ActualOut, out var actualOut))
+            {
+                return BadRequest(new { code = "INVALID_TIME", message = "Giờ vào hoặc giờ ra thực tế không đúng định dạng HH:mm." });
+            }
+
+            var dto = new CreateRegularizationDto
+            {
+                WorkDate = form.FromDate,
+                ActualTimeIn = actualIn,
+                ActualTimeOut = actualOut,
+                ReasonCode = form.ReasonCode,
+                Reason = form.Reason ?? "",
+                Files = files
+            };
+            var req = await _requestService.UpdateRegularizationRequestAsync(id, user.EmployeeCode, dto, companyId, ct);
+            _audit.Log("Request", req.RequestId, "UpdateRegularization", form.Reason);
+            return Ok(new { req.RequestId, message = "Đã cập nhật giải trình chấm công thành công." });
         }
 
         return BadRequest(new { code = "INVALID_TYPE", message = "Loại yêu cầu chỉ chấp nhận LEAVE hoặc REGULARIZATION." });
@@ -126,7 +195,14 @@ public class RequestsController : ControllerBase
             r.Status,
             r.HRNote,
             createdAt = r.CreatedAtUtc,
-            attachmentCount = r.Attachments.Count
+            attachmentCount = r.Attachments.Count,
+            attachments = r.Attachments.Select(a => new
+            {
+                a.AttachmentId,
+                a.OriginalFileName,
+                a.FileSizeBytes,
+                a.MimeType
+            })
         });
 
         return Ok(result);
@@ -228,10 +304,12 @@ public class HrRequestsController : ControllerBase
     }
 
     public record RequestDecisionDto(string Action, string? Note); // Action = APPROVE | REJECT
+    public record BatchDecisionDto(List<int> RequestIds, string Action, string? Note);
+    public record BatchDeleteDto(List<int> RequestIds);
 
     /// <summary>HCNS xem danh sách đơn chờ duyệt / đã duyệt.</summary>
     [HttpGet]
-    public async Task<IActionResult> GetRequests([FromQuery] string? status, [FromQuery] string? branch, CancellationToken ct)
+    public async Task<IActionResult> GetRequests([FromQuery] string? status, [FromQuery] string? branch, [FromQuery] string? type, CancellationToken ct)
     {
         var q = _db.EmployeeRequests
             .Include(r => r.Attachments)
@@ -266,7 +344,13 @@ public class HrRequestsController : ControllerBase
             q = q.Where(r => r.Status == status);
         }
 
-        var list = await q.OrderByDescending(r => r.CreatedAtUtc).Take(200).ToListAsync(ct);
+        if (!string.IsNullOrWhiteSpace(type))
+        {
+            var upperType = type.Trim().ToUpperInvariant();
+            q = q.Where(r => r.RequestType == upperType);
+        }
+
+        var list = await q.OrderByDescending(r => r.CreatedAtUtc).Take(300).ToListAsync(ct);
         var empCodes = list.Select(r => r.EmployeeCode).Distinct().ToList();
         var compIds = list.Select(r => r.CompanyId).Where(c => c.HasValue).Select(c => c!.Value).Distinct().ToList();
         var empQuery = _db.Employees.AsNoTracking().Where(e => empCodes.Contains(e.EmployeeCode));
@@ -321,7 +405,14 @@ public class HrRequestsController : ControllerBase
                 r.Status,
                 r.HRNote,
                 createdAt = r.CreatedAtUtc,
-                attachmentCount = r.Attachments.Count
+                attachmentCount = r.Attachments.Count,
+                attachments = r.Attachments.Select(a => new
+                {
+                    a.AttachmentId,
+                    a.OriginalFileName,
+                    a.FileSizeBytes,
+                    a.MimeType
+                })
             };
         });
 
@@ -345,6 +436,105 @@ public class HrRequestsController : ControllerBase
         _audit.Log("Request", req.RequestId, approve ? "ApproveRequest" : "RejectRequest", dto.Note);
         return Ok(new { message = $"Đã { (approve ? "phê duyệt" : "từ chối") } đơn thành công." });
     }
+
+    /// <summary>HCNS phê duyệt hoặc từ chối hàng loạt đơn.</summary>
+    [HttpPost("batch-decision")]
+    public async Task<IActionResult> BatchDecideRequests([FromBody] BatchDecisionDto dto, CancellationToken ct)
+    {
+        if (!User.IsHR()) return StatusCode(403, new { message = "Bạn không có quyền HCNS." });
+        if (dto.RequestIds == null || dto.RequestIds.Count == 0)
+        {
+            return BadRequest(new { message = "Danh sách đơn cần xử lý không được rỗng." });
+        }
+
+        bool approve = dto.Action?.Equals("APPROVE", StringComparison.OrdinalIgnoreCase) == true;
+        int successCount = 0;
+        var errors = new List<string>();
+
+        foreach (var id in dto.RequestIds)
+        {
+            try
+            {
+                var reqTarget = await _db.EmployeeRequests.AsNoTracking().FirstOrDefaultAsync(r => r.RequestId == id, ct);
+                if (reqTarget == null) continue;
+
+                await _access.EnsureEmployeeCodeAsync(reqTarget.EmployeeCode, reqTarget.CompanyId, ct);
+                await _requestService.DecideRequestAsync(id, approve, dto.Note, User.UserId(), ct);
+                _audit.Log("Request", id, approve ? "BatchApprove" : "BatchReject", dto.Note);
+                successCount++;
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"Đơn #{id}: {ex.Message}");
+            }
+        }
+
+        return Ok(new
+        {
+            success = true,
+            successCount,
+            totalCount = dto.RequestIds.Count,
+            errors,
+            message = $"Đã xử lý {(approve ? "phê duyệt" : "từ chối")} thành công {successCount}/{dto.RequestIds.Count} đơn."
+        });
+    }
+
+    /// <summary>HCNS xóa đơn (kể cả đơn đã duyệt do duyệt nhầm ngày hoặc sai thông tin).</summary>
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> DeleteRequest(int id, CancellationToken ct)
+    {
+        if (!User.IsHR()) return StatusCode(403, new { message = "Bạn không có quyền HCNS." });
+
+        var reqTarget = await _db.EmployeeRequests.AsNoTracking().FirstOrDefaultAsync(r => r.RequestId == id, ct);
+        if (reqTarget == null) return NotFound(new { message = "Không tìm thấy đơn." });
+
+        await _access.EnsureEmployeeCodeAsync(reqTarget.EmployeeCode, reqTarget.CompanyId, ct);
+
+        await _requestService.DeleteRequestByHrAsync(id, User.UserId(), ct);
+        _audit.Log("Request", id, "DeleteRequest", $"HCNS xóa đơn {reqTarget.RequestType} ngày {reqTarget.FromDate:dd/MM/yyyy} của nhân viên {reqTarget.EmployeeCode}", reqTarget.CompanyId);
+        return Ok(new { message = "Đã xóa đơn thành công." });
+    }
+
+    /// <summary>HCNS xóa hàng loạt đơn.</summary>
+    [HttpPost("batch-delete")]
+    public async Task<IActionResult> BatchDeleteRequests([FromBody] BatchDeleteDto dto, CancellationToken ct)
+    {
+        if (!User.IsHR()) return StatusCode(403, new { message = "Bạn không có quyền HCNS." });
+        if (dto.RequestIds == null || dto.RequestIds.Count == 0)
+        {
+            return BadRequest(new { message = "Danh sách đơn cần xóa không được rỗng." });
+        }
+
+        int successCount = 0;
+        var errors = new List<string>();
+
+        foreach (var id in dto.RequestIds)
+        {
+            try
+            {
+                var reqTarget = await _db.EmployeeRequests.AsNoTracking().FirstOrDefaultAsync(r => r.RequestId == id, ct);
+                if (reqTarget == null) continue;
+
+                await _access.EnsureEmployeeCodeAsync(reqTarget.EmployeeCode, reqTarget.CompanyId, ct);
+                await _requestService.DeleteRequestByHrAsync(id, User.UserId(), ct);
+                _audit.Log("Request", id, "BatchDelete", $"HCNS xóa đơn {reqTarget.RequestType} #{id}", reqTarget.CompanyId);
+                successCount++;
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"Đơn #{id}: {ex.Message}");
+            }
+        }
+
+        return Ok(new
+        {
+            success = true,
+            successCount,
+            totalCount = dto.RequestIds.Count,
+            errors,
+            message = $"Đã xóa thành công {successCount}/{dto.RequestIds.Count} đơn."
+        });
+    }
 }
 
 [ApiController]
@@ -356,31 +546,53 @@ public class AttachmentsController : ControllerBase
     private readonly AppDbContext _db;
     private readonly AccessService _access;
     private readonly IConfiguration _config;
+    private readonly ITokenService _tokenService;
 
-    public AttachmentsController(AppDbContext db, AccessService access, IConfiguration config)
+    public AttachmentsController(AppDbContext db, AccessService access, IConfiguration config, ITokenService tokenService)
     {
         _db = db;
         _access = access;
         _config = config;
+        _tokenService = tokenService;
     }
 
-    /// <summary>Tải file minh chứng an toàn (kiểm tra quyền truy cập).</summary>
+    /// <summary>Tải hoặc xem trực tiếp file minh chứng (hỗ trợ Header Bearer hoặc query token cho thẻ img/link tải).</summary>
     [HttpGet("{id}")]
-    public async Task<IActionResult> DownloadAttachment(int id, CancellationToken ct)
+    [AllowAnonymous]
+    public async Task<IActionResult> DownloadAttachment(
+        int id,
+        [FromQuery] string? token = null,
+        [FromQuery] bool download = false,
+        CancellationToken ct = default)
     {
         var att = await _db.RequestAttachments.AsNoTracking().FirstOrDefaultAsync(a => a.AttachmentId == id, ct);
-        if (att == null) return NotFound();
+        if (att == null) return NotFound(new { message = "Không tìm thấy tệp đính kèm." });
 
         var req = await _db.EmployeeRequests.AsNoTracking().FirstOrDefaultAsync(r => r.RequestId == att.RequestId, ct);
-        if (req == null) return NotFound();
+        if (req == null) return NotFound(new { message = "Không tìm thấy đơn yêu cầu liên quan." });
 
-        var uid = User.UserId();
+        ClaimsPrincipal? currentPrincipal = (User?.Identity?.IsAuthenticated == true) ? User : null;
+        if (currentPrincipal == null && !string.IsNullOrWhiteSpace(token))
+        {
+            currentPrincipal = _tokenService.ValidateToken(token);
+            if (currentPrincipal != null)
+            {
+                HttpContext.User = currentPrincipal;
+            }
+        }
+
+        if (currentPrincipal == null)
+        {
+            return Unauthorized(new { message = "Yêu cầu đăng nhập hoặc token không hợp lệ." });
+        }
+
+        var uid = currentPrincipal.UserId();
         var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
-        if (user == null) return Unauthorized();
+        if (user == null) return Unauthorized(new { message = "Người dùng không tồn tại." });
 
         if (req.EmployeeCode != user.EmployeeCode)
         {
-            if (!User.IsHR())
+            if (!currentPrincipal.IsHR())
             {
                 return StatusCode(403, new { message = "Bạn không có quyền xem tệp đính kèm này." });
             }
@@ -393,6 +605,54 @@ public class AttachmentsController : ControllerBase
         if (!System.IO.File.Exists(filePath)) return NotFound("Tệp không tồn tại trên máy chủ.");
 
         var bytes = await System.IO.File.ReadAllBytesAsync(filePath, ct);
-        return File(bytes, att.MimeType, att.OriginalFileName);
+
+        if (download)
+        {
+            return File(bytes, att.MimeType, att.OriginalFileName);
+        }
+
+        Response.Headers["Content-Disposition"] = "inline; filename=\"" + Uri.EscapeDataString(att.OriginalFileName) + "\"";
+        return File(bytes, att.MimeType);
+    }
+
+    /// <summary>Xóa tệp đính kèm khi đơn đang chờ duyệt (PENDING_HR).</summary>
+    [HttpDelete("{id}")]
+    public async Task<IActionResult> DeleteAttachment(int id, CancellationToken ct)
+    {
+        var att = await _db.RequestAttachments.FirstOrDefaultAsync(a => a.AttachmentId == id, ct);
+        if (att == null) return NotFound(new { message = "Không tìm thấy tệp đính kèm." });
+
+        var req = await _db.EmployeeRequests.FirstOrDefaultAsync(r => r.RequestId == att.RequestId, ct);
+        if (req == null) return NotFound(new { message = "Không tìm thấy đơn." });
+
+        if (req.Status != "PENDING_HR")
+        {
+            return BadRequest(new { message = "Chỉ có thể xóa tệp minh chứng khi đơn đang chờ duyệt." });
+        }
+
+        var uid = User.UserId();
+        var user = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == uid, ct);
+        if (user == null) return Unauthorized();
+
+        if (req.EmployeeCode != user.EmployeeCode && !User.IsHR())
+        {
+            return StatusCode(403, new { message = "Bạn không có quyền xóa tệp đính kèm này." });
+        }
+
+        try
+        {
+            var basePath = _config["Storage:EvidencePath"] ?? Path.Combine(AppContext.BaseDirectory, "Storage", "Evidence");
+            var filePath = Path.Combine(basePath, att.StoredFileName);
+            if (System.IO.File.Exists(filePath))
+            {
+                System.IO.File.Delete(filePath);
+            }
+        }
+        catch { }
+
+        _db.RequestAttachments.Remove(att);
+        await _db.SaveChangesAsync(ct);
+
+        return Ok(new { message = "Đã xóa tệp đính kèm thành công." });
     }
 }

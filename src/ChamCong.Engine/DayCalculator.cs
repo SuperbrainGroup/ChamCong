@@ -10,18 +10,21 @@ public static class DayCalculator
         CalendarDay day,
         Punch? punch,
         string? leaveCode,
-        IReadOnlyDictionary<string, CodeDef> codes)
+        IReadOnlyDictionary<string, CodeDef> codes,
+        bool? isGracePardoned = null)
     {
         var p = emp.Params;
+        bool gracePardoned = isGracePardoned ?? (p.GraceMaxTimesMonth > 0);
         var o = new DayOutcome { Date = day.Date.Date };
         int? pin = punch?.In, pout = punch?.Out;
         bool anyPunch = pin.HasValue || pout.HasValue;
 
-        // 1. Ngoài hiệu lực nhân viên → trống
+        // 1. Ngoài hiệu lực nhân viên → trống, không tính công, không yêu cầu giải trình
         if (day.Date.Date < emp.StartDate.Date || (emp.EndDate.HasValue && day.Date.Date > emp.EndDate.Value.Date))
         {
             o.OutOfEmployment = true;
-            if (anyPunch) o.Warnings.Add("Có dữ liệu quẹt ngoài thời gian làm việc của nhân viên");
+            o.Code = null;
+            o.PaidValue = 0;
             return o;
         }
 
@@ -57,7 +60,7 @@ public static class DayCalculator
             if (emp.ExemptPunch) { SetCode(o, Codes.HalfHoliday, codes); return o; }
             var (ss, se) = day.HalfSession == "PM" ? (p.ShiftStart, p.LunchStart) : (p.LunchEnd, p.ShiftEnd);
             return HalfDayWithWork(o, p, pin, pout, Codes.HalfHoliday, ss, se, codes,
-                "Lễ nửa ngày nhưng giờ làm thực tế dưới ngưỡng nửa công", fallbackCode: Codes.Missing);
+                "Lễ nửa ngày nhưng giờ làm thực tế dưới ngưỡng nửa công", fallbackCode: Codes.Missing, gracePardoned);
         }
 
         // 5. Có ngoại lệ nghỉ (đơn đã duyệt)
@@ -78,7 +81,7 @@ public static class DayCalculator
                 else (ss, se) = (p.ShiftStart, p.LunchStart);
                 var fallback = leaveCode == Codes.AnnualHalf ? Codes.AnnualHalfUnpaid : Codes.Missing;
                 return HalfDayWithWork(o, p, pin, pout, leaveCode, ss, se, codes,
-                    $"Nghỉ {leaveCode} nhưng giờ làm thực tế dưới ngưỡng nửa công", fallback);
+                    $"Nghỉ {leaveCode} nhưng giờ làm thực tế dưới ngưỡng nửa công", fallback, gracePardoned);
             }
             SetCode(o, leaveCode, codes);
             if (anyPunch) o.Warnings.Add($"Có quẹt thẻ trong ngày nghỉ {leaveCode} — kiểm tra mâu thuẫn đơn nghỉ");
@@ -115,19 +118,61 @@ public static class DayCalculator
         else if (halfWorkDay) (sStart, sEnd) = day.HalfSession == "PM" ? (p.LunchEnd, p.ShiftEnd) : (p.ShiftStart, p.LunchStart);
         else (sStart, sEnd) = (p.ShiftStart, p.ShiftEnd);
 
-        bool flexAllowed = p.Flexitime && !halfWorkDay;
+        bool isActualPmHalf = false;
+        bool isActualAmHalf = false;
+
+        if (!halfWorkDay && !day.ShiftStart.HasValue)
+        {
+            int amOverlap = Overlap(i, x, p.ShiftStart, p.LunchStart);
+            int pmOverlap = Overlap(i, x, p.LunchEnd, p.ShiftEnd);
+            int halfMinThreshold = (int)Math.Round(p.MinHoursHalf * 60m);
+
+            // Ca chiều: check-in từ giờ nghỉ trưa trở đi (ví dụ 12h-13h) và làm ca chiều
+            // Nhân viên check-in lúc 12:30 là đến sớm so với ca chiều (13h) -> không tính đi trễ sáng, nhận 0.5 công
+            if ((i >= p.LunchStart || amOverlap < 30) && pmOverlap >= halfMinThreshold && x > p.LunchEnd)
+            {
+                isActualPmHalf = true;
+                sStart = p.LunchEnd;
+                sEnd = p.ShiftEnd;
+            }
+            // Ca sáng: check-in buổi sáng và check-out trong/trước giờ nghỉ trưa, chiều không làm
+            else if (pmOverlap == 0 && amOverlap >= halfMinThreshold && x <= p.LunchEnd + 30)
+            {
+                isActualAmHalf = true;
+                sStart = p.ShiftStart;
+                sEnd = p.LunchStart;
+            }
+        }
+
+        bool flexAllowed = p.Flexitime && !halfWorkDay && !isActualPmHalf && !isActualAmHalf;
         int flexInEnd = sStart + (p.FlexInEnd - p.ShiftStart);
         int flexOutEnd = sEnd + (p.FlexOutEnd - p.ShiftEnd);
-        var le = LateEarly(p, sStart, sEnd, i, x, flexAllowed, flexInEnd, flexOutEnd);
+        var le = LateEarly(p, sStart, sEnd, i, x, flexAllowed, flexInEnd, flexOutEnd, gracePardoned);
 
         int worked = WorkedMinutes(p, i, x, sStart, Math.Max(sEnd, le.RequiredOut));
         o.WorkedMinutes = worked;
         int fullMin = (int)Math.Round(p.MinHoursFull * 60m);
         int halfMin = (int)Math.Round(p.MinHoursHalf * 60m);
 
+        int amWork = Overlap(i, x, p.ShiftStart, p.LunchStart);
+        int pmWork = Overlap(i, x, p.LunchEnd, p.ShiftEnd);
+        bool workedBothSessions = amWork >= 60 && pmWork >= 60;
+        bool notSuspectHalfDay = le.RawLate < p.HalfDaySuspectMinutes && le.Early < p.HalfDaySuspectMinutes;
+
+        // Đủ điều kiện tính 1.0 công:
+        // 1. Giờ làm >= fullMin (mặc định 7.5h) hoặc đạt chuẩn bù giờ Flexitime
+        // 2. Hoặc làm việc cả 2 buổi (sáng và chiều), không thuộc diện nghi nghỉ nửa buổi (< 120p),
+        //    và vào ca đúng giờ (trễ = 0, ví dụ 07:51 -> 16:13 về sớm 47p) hoặc tổng giờ làm >= 7.2h (430 phút)
+        bool eligibleFullDay = (worked >= fullMin || le.Compensated) ||
+            (!halfWorkDay && !isActualPmHalf && !isActualAmHalf && worked >= halfMin && workedBothSessions && notSuspectHalfDay &&
+             (le.Late == 0 || worked >= 430));
+
         string code;
-        if (halfWorkDay) code = worked >= halfMin ? Codes.Half : Codes.Missing;
-        else if (worked >= fullMin || le.Compensated) code = Codes.Full;
+        if (halfWorkDay || isActualPmHalf || isActualAmHalf)
+        {
+            code = worked >= halfMin ? Codes.Half : Codes.Missing;
+        }
+        else if (eligibleFullDay) code = Codes.Full;
         else if (worked >= halfMin) code = Codes.Half;
         else code = Codes.Missing;
         SetCode(o, code, codes);
@@ -138,10 +183,14 @@ public static class DayCalculator
         }
         else
         {
-            bool penalize = code == Codes.Full || halfWorkDay || p.PenalizeLateOnHalfDay;
+            bool penalize = code == Codes.Full || halfWorkDay || isActualPmHalf || isActualAmHalf || p.PenalizeLateOnHalfDay;
             if (penalize) { o.LateMinutes = le.Late; o.EarlyMinutes = le.Early; }
-            if (code == Codes.Half && !halfWorkDay && (le.RawLate >= p.HalfDaySuspectMinutes || le.Early >= p.HalfDaySuspectMinutes))
+            if (code == Codes.Half && !halfWorkDay && !isActualPmHalf && !isActualAmHalf && (le.RawLate >= p.HalfDaySuspectMinutes || le.Early >= p.HalfDaySuspectMinutes))
                 o.Warnings.Add("Nghi nghỉ nửa buổi — đối chiếu đơn nghỉ (P/2, BL/2…)");
+            else if (isActualPmHalf)
+                o.Warnings.Add("Đi làm nửa ngày ca chiều (0.5 công) — đối chiếu đơn nghỉ ca sáng (nếu có)");
+            else if (isActualAmHalf)
+                o.Warnings.Add("Đi làm nửa ngày ca sáng (0.5 công) — đối chiếu đơn nghỉ ca chiều (nếu có)");
         }
 
         if (p.OtEnabled && x - le.RequiredOut >= p.OtThreshold && p.OtThreshold >= 0 && code != Codes.Missing)
@@ -152,7 +201,8 @@ public static class DayCalculator
 
     /// <summary>Ngày nghỉ nửa ngày (L/2, P/2, BL/2): bắt buộc làm thực tế ≥ ngưỡng nửa công.</summary>
     private static DayOutcome HalfDayWithWork(DayOutcome o, EngineParams p, int? pin, int? pout, string code,
-        int sStart, int sEnd, IReadOnlyDictionary<string, CodeDef> codes, string shortMsg, string fallbackCode)
+        int sStart, int sEnd, IReadOnlyDictionary<string, CodeDef> codes, string shortMsg, string fallbackCode,
+        bool isGracePardoned = false)
     {
         int halfMin = (int)Math.Round(p.MinHoursHalf * 60m);
         if (pin.HasValue && pout.HasValue && pout > pin)
@@ -162,7 +212,7 @@ public static class DayCalculator
             if (worked >= halfMin)
             {
                 SetCode(o, code, codes);
-                var le = LateEarly(p, sStart, sEnd, pin.Value, pout.Value, false, sStart, sEnd);
+                var le = LateEarly(p, sStart, sEnd, pin.Value, pout.Value, false, sStart, sEnd, isGracePardoned);
                 o.LateMinutes = le.Late;
                 o.EarlyMinutes = le.Early;
                 return o;
@@ -177,7 +227,7 @@ public static class DayCalculator
 
     /// <summary>Flexitime &amp; ân hạn (Tính năng 3.2.2).</summary>
     public static LateEarlyResult LateEarly(EngineParams p, int sStart, int sEnd, int i, int x,
-        bool flexAllowed, int flexInEnd, int flexOutEnd)
+        bool flexAllowed, int flexInEnd, int flexOutEnd, bool isGracePardoned = false)
     {
         int rawLate = Math.Max(0, i - sStart);
         int reqOut = sEnd;
@@ -187,13 +237,24 @@ public static class DayCalculator
             reqOut = sEnd - credit;
         }
 
-        if (rawLate <= p.GraceMinutes)
-            return new(0, Math.Max(0, reqOut - x), reqOut, false, rawLate);
+        if (rawLate == 0)
+            return new(0, Math.Max(0, reqOut - x), reqOut, false, 0);
 
+        // 1. Kiểm tra bù giờ đối xứng Flexitime trước (nếu làm bù đủ giờ về thì tính đủ công, 0 trễ và không trừ lượt du di)
         if (flexAllowed && i <= flexInEnd)
         {
             reqOut = Math.Min(sEnd + rawLate, flexOutEnd);
             if (x >= reqOut) return new(0, 0, reqOut, true, rawLate);
+        }
+
+        // 2. Nếu check-in trong khoảng thời gian du di và ĐƯỢC miễn trễ (còn số lần du di trong tháng):
+        if (rawLate <= p.GraceMinutes && isGracePardoned)
+            return new(0, Math.Max(0, sEnd - x), sEnd, false, rawLate);
+
+        // 3. Không được bù hoặc đã hết lượt du di / vượt quá thời gian du di:
+        if (flexAllowed && i <= flexInEnd)
+        {
+            reqOut = Math.Min(sEnd + rawLate, flexOutEnd);
             int early = Math.Max(0, sEnd - x);
             int late = p.ShortfallOnly ? (reqOut - x) - early : rawLate;
             return new(late, early, reqOut, false, rawLate);

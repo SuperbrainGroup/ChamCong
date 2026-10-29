@@ -3,7 +3,7 @@ import { User, Company } from '../../types';
 import { api } from '../../api/client';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { Users, Plus, Edit2, Lock, Unlock, KeyRound, ArrowLeft, Shield, AlertCircle, Building2, Filter, Search, RotateCcw } from 'lucide-react';
+import { Users, Plus, Edit2, Trash2, Lock, Unlock, KeyRound, ArrowLeft, Shield, AlertCircle, Building2, Filter, Search, RotateCcw } from 'lucide-react';
 
 interface UsersManagerProps {
   onBack?: () => void;
@@ -131,6 +131,46 @@ export const UsersManager: React.FC<UsersManagerProps> = ({ onBack }) => {
       await fetchData();
     } catch (err: any) {
       toast.error(err.response?.data?.message || 'Lỗi khi thay đổi trạng thái khóa.');
+    }
+  };
+
+  const handleDeleteUser = async (u: User) => {
+    if (!isCurrentUserAdmin) {
+      toast.error('Chỉ Quản trị viên hệ thống (Admin) mới có quyền xóa tài khoản người dùng.');
+      return;
+    }
+
+    if (currentUser?.id === u.id) {
+      toast.error('Bạn không thể tự xóa tài khoản của chính mình đang đăng nhập.');
+      return;
+    }
+
+    // BƯỚC 1: Toast confirm xác nhận xóa tài khoản (Bước 1/2)
+    const confirmedStep1 = await toast.confirm({
+      title: 'Xác nhận xóa tài khoản (Bước 1/2)',
+      message: `Bạn có chắc chắn muốn xóa tài khoản @${u.username} (${u.fullName} - ${u.role}) khỏi hệ thống?`,
+      confirmText: 'Tiếp tục xóa',
+      cancelText: 'Hủy bỏ',
+      type: 'warning'
+    });
+    if (!confirmedStep1) return;
+
+    // BƯỚC 2: Toast confirm nguy hiểm cấp cao (Bước 2/2)
+    const confirmedStep2 = await toast.confirm({
+      title: '⚠️ CẢNH BÁO NGUY HIỂM: Xóa tài khoản vĩnh viễn (Bước 2/2)',
+      message: `Tài khoản @${u.username} sẽ bị XÓA VĨNH VIỄN khỏi hệ thống cùng toàn bộ phân quyền hội sở, thông báo và token đăng nhập liên quan. Thao tác này KHÔNG THỂ HOÀN TÁC! Bạn có chắc chắn 100% muốn xóa không?`,
+      confirmText: 'XÓA TÀI KHOẢN VĨNH VIỄN',
+      cancelText: 'Hủy thao tác',
+      type: 'danger'
+    });
+    if (!confirmedStep2) return;
+
+    try {
+      const res = await api.delete(`/users/${u.id}`);
+      toast.success(res.data?.message || `Đã xóa vĩnh viễn tài khoản @${u.username} thành công.`);
+      await fetchData();
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || 'Lỗi khi xóa tài khoản người dùng.');
     }
   };
 
@@ -271,9 +311,32 @@ export const UsersManager: React.FC<UsersManagerProps> = ({ onBack }) => {
                         </td>
                         <td>
                           {u.role === 'Admin' ? (
-                            <span style={{ fontSize: '12px', color: 'var(--primary-text)', fontWeight: 600 }}>
-                              Toàn quyền tất cả hội sở
-                            </span>
+                            u.assignedCompanyIds && u.assignedCompanyIds.length > 0 ? (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                                  {u.assignedCompanyIds.map((cid) => {
+                                    const c = compMap.get(cid);
+                                    return c ? (
+                                      <span key={cid} className="badge badge-primary" style={{ fontSize: '11px' }}>
+                                        {c.code}
+                                      </span>
+                                    ) : null;
+                                  })}
+                                </div>
+                                <span style={{ fontSize: '11px', color: 'var(--neutral-500)' }}>
+                                  (Chỉ nhận thông báo {u.assignedCompanyIds.length} cơ sở được gán)
+                                </span>
+                              </div>
+                            ) : (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                                <span style={{ fontSize: '12px', color: 'var(--primary-text)', fontWeight: 600 }}>
+                                  Toàn quyền tất cả hội sở
+                                </span>
+                                <span style={{ fontSize: '11px', color: 'var(--neutral-500)' }}>
+                                  (Nhận thông báo mọi hội sở)
+                                </span>
+                              </div>
+                            )
                           ) : u.assignedCompanyIds && u.assignedCompanyIds.length > 0 ? (
                             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                               {u.assignedCompanyIds.map((cid) => {
@@ -318,6 +381,23 @@ export const UsersManager: React.FC<UsersManagerProps> = ({ onBack }) => {
                             >
                               {u.isLocked ? <Unlock size={13} /> : <Lock size={13} />}
                             </button>
+
+                            {isCurrentUserAdmin && (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => handleDeleteUser(u)}
+                                disabled={currentUser?.id === u.id}
+                                title={currentUser?.id === u.id ? 'Không thể tự xóa tài khoản của mình' : 'Xóa tài khoản vĩnh viễn'}
+                                style={{
+                                  color: currentUser?.id === u.id ? '#94a3b8' : '#dc2626',
+                                  borderColor: currentUser?.id === u.id ? '#e2e8f0' : '#fecaca',
+                                  backgroundColor: currentUser?.id === u.id ? '#f8fafc' : '#fef2f2',
+                                  cursor: currentUser?.id === u.id ? 'not-allowed' : 'pointer'
+                                }}
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -410,35 +490,56 @@ export const UsersManager: React.FC<UsersManagerProps> = ({ onBack }) => {
                   </select>
                 </div>
 
-                {(role === 'HR' || (!isCurrentUserAdmin && role === 'Employee')) && (
-                  <div className="form-group">
-                    <label className="form-label">Gán các Hội sở phụ trách</label>
-                    <div style={{
-                      maxHeight: '160px',
-                      overflowY: 'auto',
-                      border: '1px solid var(--neutral-300)',
-                      borderRadius: 'var(--radius)',
-                      padding: '8px 12px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '6px'
-                    }}>
-                      {companies.map((c) => (
-                        <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', cursor: 'pointer' }}>
-                          <input
-                            type="checkbox"
-                            checked={assignedCompanies.includes(c.id)}
-                            onChange={(e) => {
-                              if (e.target.checked) setAssignedCompanies([...assignedCompanies, c.id]);
-                              else setAssignedCompanies(assignedCompanies.filter(x => x !== c.id));
-                            }}
-                          />
-                          <span>{c.code} - {c.name}</span>
-                        </label>
-                      ))}
-                    </div>
+                <div className="form-group">
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                    <label className="form-label" style={{ marginBottom: 0 }}>
+                      {role === 'Admin' 
+                        ? 'Gán các Hội sở phụ trách & Nhận thông báo'
+                        : role === 'HR'
+                        ? 'Gán các Hội sở phụ trách & Nhận thông báo (Bắt buộc)'
+                        : 'Hội sở trực thuộc'}
+                    </label>
+                    {role === 'Admin' && (
+                      <span style={{ fontSize: '11px', color: 'var(--neutral-500)' }}>
+                        (Trống = Nhận thông báo & Quản lý tất cả)
+                      </span>
+                    )}
                   </div>
-                )}
+                  <div style={{
+                    maxHeight: '160px',
+                    overflowY: 'auto',
+                    border: '1px solid var(--neutral-300)',
+                    borderRadius: 'var(--radius)',
+                    padding: '8px 12px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px'
+                  }}>
+                    {companies.map((c) => (
+                      <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={assignedCompanies.includes(c.id)}
+                          onChange={(e) => {
+                            if (e.target.checked) setAssignedCompanies([...assignedCompanies, c.id]);
+                            else setAssignedCompanies(assignedCompanies.filter(x => x !== c.id));
+                          }}
+                        />
+                        <span>{c.code} - {c.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                  {role === 'Admin' && assignedCompanies.length === 0 && (
+                    <div style={{ fontSize: '12px', color: 'var(--primary)', marginTop: '4px' }}>
+                      ℹ️ Đang thiết lập <strong>Toàn quyền</strong>: Nhận thông báo và quản lý tất cả các cơ sở. Tick chọn các cơ sở cụ thể nếu muốn hạn chế chỉ nhận thông báo từ cơ sở đó.
+                    </div>
+                  )}
+                  {role === 'Admin' && assignedCompanies.length > 0 && (
+                    <div style={{ fontSize: '12px', color: 'var(--success-text)', marginTop: '4px' }}>
+                      ✅ Tài khoản Admin này sẽ chỉ nhận thông báo và làm việc với {assignedCompanies.length} hội sở đã chọn.
+                    </div>
+                  )}
+                </div>
 
                 {editingId && (
                   <div className="form-group">

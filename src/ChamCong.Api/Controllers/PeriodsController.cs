@@ -18,8 +18,10 @@ public class PeriodsController : ControllerBase
     private readonly AccessService _access;
     private readonly AuditService _audit;
     private readonly IImportService _importService;
-    private readonly ICalculationService _calcService;
     private readonly IExcelExportService _exportService;
+    private readonly ITimesheetPublicationService _publicationService;
+    private readonly ICalculationService _calcService;
+    private readonly ILeaveService _leaveService;
 
     public PeriodsController(
         AppDbContext db,
@@ -27,7 +29,9 @@ public class PeriodsController : ControllerBase
         AuditService audit,
         IImportService importService,
         ICalculationService calcService,
-        IExcelExportService exportService)
+        IExcelExportService exportService,
+        ITimesheetPublicationService publicationService,
+        ILeaveService leaveService)
     {
         _db = db;
         _access = access;
@@ -35,6 +39,8 @@ public class PeriodsController : ControllerBase
         _importService = importService;
         _calcService = calcService;
         _exportService = exportService;
+        _publicationService = publicationService;
+        _leaveService = leaveService;
     }
 
     public record PeriodDto(
@@ -491,6 +497,10 @@ public class PeriodsController : ControllerBase
             .Where(n => n.PeriodId == id)
             .ToDictionaryAsync(n => n.EmployeeId, n => n.Note, ct);
 
+        // Lấy dữ liệu quỹ phép năm tại kỳ công hiện tại
+        var leaveFundsList = await _leaveService.GetCompanyLeaveFundsAsync(period.CompanyId, period.Year, period.Month, ct);
+        var leaveFundsMap = leaveFundsList.ToDictionary(f => f.EmployeeId);
+
         var daysCount = (period.ToDate.Date - period.FromDate.Date).Days + 1;
         var periodDates = Enumerable.Range(0, daysCount).Select(i => period.FromDate.Date.AddDays(i)).ToList();
 
@@ -533,7 +543,12 @@ public class PeriodsController : ControllerBase
                 PaidLeaveValue = k.Value.PaidLeaveValue
             });
 
-            var summary = SummaryCalculator.Summarize(summaryDays, codeDefs, period.StandardDays);
+            var empStandard = emp.EmployeeType == "PARTTIME"
+                ? SummaryCalculator.Summarize(summaryDays, codeDefs, 0).PaidDays
+                : period.StandardDays;
+            var summary = SummaryCalculator.Summarize(summaryDays, codeDefs, empStandard);
+
+            leaveFundsMap.TryGetValue(emp.Id, out var lb);
 
             return new
             {
@@ -545,12 +560,26 @@ public class PeriodsController : ControllerBase
                     departmentName = emp.DepartmentId.HasValue && depts.TryGetValue(emp.DepartmentId.Value, out var dn) ? dn : "",
                     groupName = grps.TryGetValue(emp.GroupId, out var gn) ? gn : "",
                     emp.ExemptPunch,
+                    employeeType = emp.EmployeeType ?? "STANDARD",
                     defaultNote = emp.DefaultNote,
                     startDate = emp.StartDate,
                     endDate = emp.EndDate
                 },
                 note = notes.TryGetValue(emp.Id, out var nt) ? nt : "",
                 summary,
+                leaveBalance = lb != null ? new
+                {
+                    annualOpening = lb.AnnualOpening,
+                    carryOpening = lb.CarryOpening,
+                    opening = lb.AnnualOpening + lb.CarryOpening,
+                    accrued = lb.Accrued,
+                    totalEarned = lb.TotalAnnualEarned,
+                    monthUsed = lb.MonthUsed,
+                    monthAnnualUsed = lb.MonthAnnualUsed,
+                    totalUsed = lb.TotalUsed,
+                    available = lb.AvailableBalance,
+                    isExhausted = lb.IsExhausted
+                } : null,
                 days = dayCells
             };
         }).ToList();
@@ -596,30 +625,43 @@ public class PeriodsController : ControllerBase
 
         var reason = Text.Required(dto.Reason, "Lý do chỉnh sửa", 500);
 
+        var targetDate = dto.Date.Date;
         var result = await _db.DayResults
-            .FirstOrDefaultAsync(r => r.PeriodId == id && r.EmployeeId == dto.EmployeeId && r.Date == dto.Date.Date, ct);
+            .FirstOrDefaultAsync(r => r.PeriodId == id && r.EmployeeId == dto.EmployeeId && r.Date == targetDate, ct);
+
+        if (result == null)
+        {
+            // Dự phòng trường hợp client gửi lệch múi giờ +-1 ngày
+            result = await _db.DayResults
+                .FirstOrDefaultAsync(r => r.PeriodId == id && r.EmployeeId == dto.EmployeeId &&
+                    (r.Date == targetDate.AddDays(1) || r.Date == targetDate.AddDays(-1)), ct);
+        }
 
         if (result == null) return NotFound(new { message = "Không tìm thấy ngày công của nhân viên." });
 
-        var codeDef = !string.IsNullOrEmpty(dto.Code)
-            ? await _db.AttendanceCodes.FirstOrDefaultAsync(c => c.CompanyId == period.CompanyId && c.Code == dto.Code, ct)
+        var codeToUse = dto.Code?.Trim();
+        if (codeToUse == "1/2P") codeToUse = "P/2";
+
+        var codeDef = !string.IsNullOrEmpty(codeToUse)
+            ? await _db.AttendanceCodes.FirstOrDefaultAsync(c => c.CompanyId == period.CompanyId && c.Code == codeToUse, ct)
             : null;
 
-        if (!string.IsNullOrEmpty(dto.Code) && codeDef == null)
+        if (!string.IsNullOrEmpty(codeToUse) && codeDef == null)
         {
-            return BadRequest(new { message = $"Mã ký hiệu '{dto.Code}' không có trong Bảng quy chuẩn." });
+            return BadRequest(new { message = $"Mã ký hiệu '{codeToUse}' không có trong Bảng quy chuẩn." });
         }
 
         var oldCode = result.Code;
-        result.Code = dto.Code;
+        result.Code = codeToUse;
         result.PaidValue = codeDef != null ? (codeDef.WorkValue + codeDef.HolidayValue + codeDef.AnnualLeaveValue + codeDef.PaidLeaveValue) : 0;
         result.IsManual = true;
         result.ManualReason = reason;
         result.ManualBy = _access.Username;
         result.ManualAt = DateTime.Now;
+        result.Warnings = null; // Đã xử lý giải trình xong, xóa cảnh báo tồn đọng
 
         _audit.Log("DayResult", result.Id, "ManualOverride",
-            new { periodId = id, employeeId = dto.EmployeeId, date = dto.Date, oldCode, newCode = dto.Code, reason },
+            new { periodId = id, employeeId = dto.EmployeeId, date = dto.Date, oldCode, newCode = codeToUse, reason },
             companyId: period.CompanyId, periodId: id);
 
         await _db.SaveChangesAsync(ct);
@@ -747,7 +789,7 @@ public class PeriodsController : ControllerBase
 
         var list = await _db.DayResults
             .AsNoTracking()
-            .Where(r => r.PeriodId == id && !r.OutOfEmployment && (!string.IsNullOrEmpty(r.Warnings) || r.Code == Codes.Missing || r.Code == Codes.Vacant))
+            .Where(r => r.PeriodId == id && !r.OutOfEmployment && (!string.IsNullOrEmpty(r.Warnings) || r.Code == Codes.Missing || r.Code == Codes.Vacant || r.Code == "V" || r.Code == "KP"))
             .OrderBy(r => r.Date)
             .ThenBy(r => r.EmployeeId)
             .ToListAsync(ct);
@@ -755,9 +797,20 @@ public class PeriodsController : ControllerBase
         var emps = await _db.Employees
             .AsNoTracking()
             .Where(e => list.Select(l => l.EmployeeId).Contains(e.Id))
-            .ToDictionaryAsync(e => e.Id, e => new { e.EmployeeCode, e.FullName }, ct);
+            .ToDictionaryAsync(e => e.Id, e => new { e.EmployeeCode, e.FullName, e.StartDate, e.EndDate }, ct);
 
-        var result = list.Select(r =>
+        // Lọc kỹ thêm một lần nữa theo StartDate và EndDate của nhân viên
+        var filteredList = list.Where(r =>
+        {
+            if (emps.TryGetValue(r.EmployeeId, out var empInfo))
+            {
+                if (r.Date.Date < empInfo.StartDate.Date) return false;
+                if (empInfo.EndDate.HasValue && r.Date.Date > empInfo.EndDate.Value.Date) return false;
+            }
+            return true;
+        }).ToList();
+
+        var result = filteredList.Select(r =>
         {
             emps.TryGetValue(r.EmployeeId, out var emp);
             return new
@@ -792,37 +845,80 @@ public class PeriodsController : ControllerBase
         }
 
         // Ràng buộc bảo đảm chất lượng dữ liệu:
-        // Không chốt được khi còn ngày mang mã ? hoặc V chưa được giải trình/sửa tay
+        // Không chốt được khi còn ngày mang mã ? hoặc V/KP chưa được giải trình/sửa tay (loại trừ ngoài thời gian làm việc)
         var unreviewedCount = await _db.DayResults
-            .CountAsync(r => r.PeriodId == id && !r.OutOfEmployment && !r.IsManual && (r.Code == Codes.Missing || r.Code == Codes.Vacant), ct);
+            .CountAsync(r => r.PeriodId == id && !r.OutOfEmployment && !r.IsManual && (r.Code == Codes.Missing || r.Code == Codes.Vacant || r.Code == "V" || r.Code == "KP"), ct);
 
         if (unreviewedCount > 0)
         {
             return BadRequest(new
             {
-                message = $"Không thể chốt kỳ công: Còn {unreviewedCount} ngày có nghi vấn thiếu quẹt (?) hoặc vắng (V) chưa được giải trình/chọn mã đúng. Vui lòng xử lý toàn bộ danh sách giải trình trước khi chốt.",
+                message = $"Không thể chốt kỳ công: Còn {unreviewedCount} ngày có nghi vấn thiếu quẹt (?) hoặc vắng không phép (KP) chưa được giải trình/chọn mã đúng. Vui lòng xử lý toàn bộ danh sách giải trình trước khi chốt.",
                 unreviewedCount
             });
         }
 
-        // Kiểm tra xem có mã máy quẹt nào chưa khớp không
+        // Không chặn chốt công khi còn mã máy quẹt chưa gán (cho phép chốt bình thường do file import danh sách có thể bị dư)
         var lastBatch = await _db.ImportBatches.FirstOrDefaultAsync(b => b.PeriodId == id && b.IsCurrent, ct);
-        if (lastBatch != null && lastBatch.UnmatchedCodes > 0)
-        {
-            return BadRequest(new
-            {
-                message = $"Không thể chốt kỳ công: Còn {lastBatch.UnmatchedCodes} mã máy chấm công chưa được gán nhân viên. Vui lòng vào danh mục nhân viên cập nhật mã máy hoặc xác nhận loại trừ."
-            });
-        }
+        var unmatchedInfo = lastBatch != null && lastBatch.UnmatchedCodes > 0
+            ? $" (Ghi nhận {lastBatch.UnmatchedCodes} mã máy chưa gán từ file import đã được bỏ qua)"
+            : "";
 
         period.Status = PeriodStatus.Closed;
         period.ClosedBy = _access.Username;
         period.ClosedAt = DateTime.Now;
 
-        _audit.Log("Period", period.Id, "ClosePeriod", $"Chốt kỳ công tháng {period.Month:00}/{period.Year}", companyId: period.CompanyId, periodId: id);
+        // Tự động tính lại số ngày phép năm cho từng nhân viên: +1 ngày nếu làm việc >= 50% ngày công chuẩn của tháng
+        var accruedCount = await _leaveService.RecalculateAndAccrueLeaveForPeriodAsync(period.Id, ct);
+
+        _audit.Log("Period", period.Id, "ClosePeriod", $"Chốt kỳ công tháng {period.Month:00}/{period.Year} (Cộng +1 phép năm cho {accruedCount} nhân viên đủ >= 50% ngày công chuẩn){unmatchedInfo}", companyId: period.CompanyId, periodId: id);
         await _db.SaveChangesAsync(ct);
 
-        return Ok(new { message = "Chốt kỳ công thành công. Toàn bộ kết quả và sổ cái phép của kỳ đã được khóa an toàn." });
+        // Tự động công bố bảng chấm công chính thức và gửi thông báo tới nhân viên
+        var comp = await _db.Companies.FirstOrDefaultAsync(c => c.Id == period.CompanyId, ct);
+        try
+        {
+            if (comp != null)
+            {
+                var hrUserId = User.UserId();
+                await _publicationService.PublishTimesheetAsync(period.Id, comp.Code, $"Tự động công bố khi chốt kỳ công tháng {period.Month:00}/{period.Year}", hrUserId, ct);
+            }
+        }
+        catch
+        {
+            // Dự phòng: Nếu PublishTimesheetAsync gặp lỗi ngoại lệ, tạo thông báo trực tiếp cho nhân viên
+            var activeEmployees = await _db.Employees
+                .AsNoTracking()
+                .Where(e => e.CompanyId == period.CompanyId && (e.EndDate == null || e.EndDate >= period.FromDate))
+                .ToListAsync(ct);
+            var empCodes = activeEmployees.Select(e => e.EmployeeCode).ToHashSet();
+            var empUsers = await _db.Users
+                .Where(u => u.EmployeeCode != null && empCodes.Contains(u.EmployeeCode) && u.IsActive)
+                .ToListAsync(ct);
+
+            foreach (var u in empUsers)
+            {
+                _db.Notifications.Add(new Notification
+                {
+                    UserId = u.Id,
+                    CompanyId = period.CompanyId,
+                    BranchCode = comp?.Code,
+                    Title = $"Bảng chấm công Tháng {period.Month:00}/{period.Year} đã được chốt",
+                    Body = $"HCNS đã hoàn tất chốt kỳ công Tháng {period.Month:00}/{period.Year}. Bạn có thể vào xem chi tiết chấm công, ngày phép, ngày trễ và phép năm còn lại.",
+                    LinkType = "TIMESHEET",
+                    LinkId = period.Id,
+                    IsRead = false,
+                    CreatedAtUtc = DateTime.UtcNow
+                });
+            }
+            await _db.SaveChangesAsync(ct);
+        }
+
+        return Ok(new
+        {
+            message = $"Chốt kỳ công thành công. Đã tính lại số ngày phép và cộng +1 ngày phép năm cho {accruedCount} nhân viên làm việc đủ từ 50% ngày công chuẩn.",
+            accruedCount
+        });
     }
 
     public record ReopenPeriodDto(string Reason);
@@ -843,56 +939,169 @@ public class PeriodsController : ControllerBase
         period.ClosedBy = null;
         period.ClosedAt = null;
 
+        // Hoàn tác phần ngày phép tích lũy từ kỳ công này khi mở chốt
+        await _leaveService.RevertLeaveAccrualForPeriodAsync(period.Id, ct);
+
         _audit.Log("Period", period.Id, "ReopenPeriod", new { reason, reopenedBy = _access.Username }, companyId: period.CompanyId, periodId: id);
         await _db.SaveChangesAsync(ct);
 
-        return Ok(new { message = "Đã mở chốt kỳ công thành công." });
+        return Ok(new { message = "Đã mở chốt kỳ công thành công và hoàn tác ngày phép tích lũy của kỳ này." });
     }
 
-    // Xóa toàn bộ dữ liệu chấm công của một kỳ
+    // Xóa toàn bộ dữ liệu chấm công của một kỳ kèm theo toàn bộ bảng khóa ngoại liên quan
     [HttpDelete("{id}")]
-    [Authorize(Roles = Roles.Admin)]
-    public async Task<IActionResult> DeletePeriod(int id, CancellationToken ct)
+    [Authorize(Roles = $"{Roles.Admin},{Roles.HR},Operator,ADMIN,HR,OPERATOR")]
+    public async Task<IActionResult> DeletePeriod(int id, [FromQuery] bool force = false, CancellationToken ct = default)
     {
+        _access.EnsureOperatorOrAdmin();
         var period = await _access.GetPeriodAsync(id, tracking: true, ct);
 
-        if (period.Status == PeriodStatus.Closed)
+        // Nếu kỳ đã chốt nhưng chưa xác nhận force và không phải Admin, yêu cầu xác nhận rõ ràng
+        if (period.Status == PeriodStatus.Closed && !force && !_access.IsAdmin)
         {
-            return BadRequest(new { message = "Kỳ công đã chốt. Chỉ Admin mới có thể mở chốt và xóa kỳ công. Hãy mở chốt kỳ trước khi xóa." });
+            return BadRequest(new
+            {
+                message = "Kỳ công đã chốt. Vui lòng xác nhận để hoàn tác ngày phép tích lũy và xóa sạch toàn bộ dữ liệu liên quan.",
+                requiresConfirm = true
+            });
         }
 
-        // Xóa toàn bộ dữ liệu chấm công
-        var dayResults = await _db.DayResults.Where(r => r.PeriodId == id).ToListAsync(ct);
-        if (dayResults.Count > 0) _db.DayResults.RemoveRange(dayResults);
+        int deletedDayResults = 0;
+        int deletedRawPunches = 0;
+        int deletedImportBatches = 0;
+        int deletedLeaveLedger = 0;
+        int deletedPublications = 0;
 
-        var manualBackups = await _db.DayResultManualBackups.Where(b => b.PeriodId == id).ToListAsync(ct);
-        if (manualBackups.Count > 0) _db.DayResultManualBackups.RemoveRange(manualBackups);
-
-        var rawPunches = await _db.RawPunches.Where(p => p.PeriodId == id).ToListAsync(ct);
-        if (rawPunches.Count > 0) _db.RawPunches.RemoveRange(rawPunches);
-
-        var importBatches = await _db.ImportBatches.Where(b => b.PeriodId == id).ToListAsync(ct);
-        if (importBatches.Count > 0) _db.ImportBatches.RemoveRange(importBatches);
-
-        var periodNotes = await _db.PeriodNotes.Where(n => n.PeriodId == id).ToListAsync(ct);
-        if (periodNotes.Count > 0) _db.PeriodNotes.RemoveRange(periodNotes);
-
-        var exportHistory = await _db.ExportHistory.Where(e => e.PeriodId == id).ToListAsync(ct);
-        if (exportHistory.Count > 0) _db.ExportHistory.RemoveRange(exportHistory);
-
-        _audit.Log("Period", period.Id, "DeletePeriod",
-            $"Xóa toàn bộ kỳ công tháng {period.Month:00}/{period.Year} ({dayResults.Count} ngày công, {rawPunches.Count} raw punches, {importBatches.Count} batches)",
-            companyId: period.CompanyId, periodId: id);
-
-        _db.Periods.Remove(period);
-        await _db.SaveChangesAsync(ct);
-
-        return Ok(new
+        try
         {
-            message = $"Đã xóa toàn bộ kỳ công tháng {period.Month:00}/{period.Year} và {dayResults.Count} bản ghi chấm công.",
-            deletedDayResults = dayResults.Count,
-            deletedRawPunches = rawPunches.Count
-        });
+            var strategy = _db.Database.CreateExecutionStrategy();
+            await strategy.ExecuteAsync(async () =>
+            {
+                using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+                // 0. Nếu kỳ đã chốt hoặc đã tính, hoàn tác các ngày phép năm tích lũy (+1 phép) của kỳ này trước
+                if (period.Status == PeriodStatus.Closed)
+                {
+                    await _leaveService.RevertLeaveAccrualForPeriodAsync(id, ct);
+                }
+
+                // 1. Xóa các bản công bố bảng công, khiếu nại và dòng chi tiết (Phase 2 snapshot & dispute)
+                var publications = await _db.TimesheetPublications.Where(p => p.PeriodId == id).ToListAsync(ct);
+                if (publications.Count > 0)
+                {
+                    deletedPublications = publications.Count;
+                    var pubIds = publications.Select(p => p.PublicationId).ToList();
+
+                    var disputes = await _db.TimesheetDisputes.Where(d => pubIds.Contains(d.PublicationId)).ToListAsync(ct);
+                    if (disputes.Count > 0) _db.TimesheetDisputes.RemoveRange(disputes);
+
+                    var publishedLines = await _db.TimesheetPublishedLines.Where(l => pubIds.Contains(l.PublicationId)).ToListAsync(ct);
+                    if (publishedLines.Count > 0) _db.TimesheetPublishedLines.RemoveRange(publishedLines);
+
+                    await _db.SaveChangesAsync(ct);
+
+                    _db.TimesheetPublications.RemoveRange(publications);
+                    await _db.SaveChangesAsync(ct);
+                }
+
+                // 2. Dữ liệu quẹt thô và các đợt nạp file (RawPunches & ImportBatches)
+                // Lưu ý: RawPunches có FK tới ImportBatches (BatchId) -> Xóa hoặc unbind RawPunches trước
+                var importBatches = await _db.ImportBatches.Where(b => b.PeriodId == id).ToListAsync(ct);
+                var batchIds = importBatches.Select(b => b.Id).ToList();
+
+                var rawPunches = await _db.RawPunches.Where(p => p.PeriodId == id || (p.BatchId != null && batchIds.Contains(p.BatchId.Value))).ToListAsync(ct);
+                if (rawPunches.Count > 0)
+                {
+                    deletedRawPunches = rawPunches.Count;
+                    _db.RawPunches.RemoveRange(rawPunches);
+                    await _db.SaveChangesAsync(ct);
+                }
+
+                if (batchIds.Count > 0)
+                {
+                    var punchesWithBatch = await _db.RawPunches.Where(p => p.BatchId != null && batchIds.Contains(p.BatchId.Value)).ToListAsync(ct);
+                    if (punchesWithBatch.Count > 0)
+                    {
+                        foreach (var p in punchesWithBatch) p.BatchId = null;
+                        await _db.SaveChangesAsync(ct);
+                    }
+                }
+
+                if (importBatches.Count > 0)
+                {
+                    deletedImportBatches = importBatches.Count;
+                    _db.ImportBatches.RemoveRange(importBatches);
+                    await _db.SaveChangesAsync(ct);
+                }
+
+                // 3. Kết quả ngày công và bản lưu thủ công
+                var manualBackups = await _db.DayResultManualBackups.Where(b => b.PeriodId == id).ToListAsync(ct);
+                if (manualBackups.Count > 0) _db.DayResultManualBackups.RemoveRange(manualBackups);
+
+                var dayResults = await _db.DayResults.Where(r => r.PeriodId == id).ToListAsync(ct);
+                if (dayResults.Count > 0)
+                {
+                    deletedDayResults = dayResults.Count;
+                    _db.DayResults.RemoveRange(dayResults);
+                }
+                await _db.SaveChangesAsync(ct);
+
+                // 4. Sổ cái phép phát sinh từ kỳ này (FK_LeaveLedger_Periods)
+                var leaveLedger = await _db.LeaveLedger.Where(l => l.PeriodId == id).ToListAsync(ct);
+                if (leaveLedger.Count > 0)
+                {
+                    deletedLeaveLedger = leaveLedger.Count;
+                    _db.LeaveLedger.RemoveRange(leaveLedger);
+                }
+
+                // 5. Thông báo liên kết với kỳ này
+                var notis = await _db.Notifications.Where(n => n.LinkType == "TIMESHEET" && n.LinkId == id).ToListAsync(ct);
+                if (notis.Count > 0) _db.Notifications.RemoveRange(notis);
+
+                // 6. Ghi chú kỳ công
+                var periodNotes = await _db.PeriodNotes.Where(n => n.PeriodId == id).ToListAsync(ct);
+                if (periodNotes.Count > 0) _db.PeriodNotes.RemoveRange(periodNotes);
+
+                // 7. Lịch sử xuất file
+                var exportHistory = await _db.ExportHistory.Where(e => e.PeriodId == id).ToListAsync(ct);
+                if (exportHistory.Count > 0) _db.ExportHistory.RemoveRange(exportHistory);
+
+                await _db.SaveChangesAsync(ct);
+
+                // 8. Gỡ liên kết PeriodId trong AuditLogs nếu có
+                var auditLogs = await _db.AuditLogs.Where(a => a.PeriodId == id).ToListAsync(ct);
+                if (auditLogs.Count > 0)
+                {
+                    foreach (var al in auditLogs) al.PeriodId = null;
+                    await _db.SaveChangesAsync(ct);
+                }
+
+                // 9. Ghi log kiểm toán thao tác xóa kỳ công (periodId: null để tránh FK)
+                _audit.Log("Period", period.Id, "DeletePeriod",
+                    $"Xóa hoàn toàn kỳ công tháng {period.Month:00}/{period.Year} ({deletedDayResults} ngày công, {deletedRawPunches} raw punches, {deletedImportBatches} batches, {deletedLeaveLedger} sổ cái phép, {deletedPublications} bản công bố)",
+                    companyId: period.CompanyId, periodId: null);
+
+                // 10. Xóa Period chính
+                _db.Periods.Remove(period);
+                await _db.SaveChangesAsync(ct);
+
+                await tx.CommitAsync(ct);
+            });
+
+            return Ok(new
+            {
+                message = $"Đã xóa thành công kỳ công tháng {period.Month:00}/{period.Year} và toàn bộ dữ liệu phụ thuộc liên quan.",
+                deletedDayResults,
+                deletedRawPunches,
+                deletedImportBatches,
+                deletedLeaveLedger,
+                deletedPublications
+            });
+        }
+        catch (Exception ex)
+        {
+            return StatusCode(500, new { message = "Lỗi khi xóa kỳ chấm công: " + ex.Message });
+        }
     }
 
     // EXPORT EXCEL
@@ -938,8 +1147,56 @@ public class PeriodsController : ControllerBase
                 Color = c.Color
             }, ct);
 
+        // Tổng hợp số ngày nghỉ phép theo từng tháng trong năm cho Sheet Phép năm
+        var empIds = employees.Select(e => e.Id).ToList();
+        var yearlyLeaveByMonth = new Dictionary<int, Dictionary<int, decimal>>();
+        foreach (var eid in empIds)
+        {
+            var mDict = new Dictionary<int, decimal>();
+            for (int m = 1; m <= 12; m++) mDict[m] = 0m;
+            yearlyLeaveByMonth[eid] = mDict;
+        }
+
+        // 1. Lấy kết quả từ DayResults của các kỳ khác trong cùng năm
+        var yearPeriodIds = await _db.Periods.AsNoTracking()
+            .Where(p => p.CompanyId == period.CompanyId && p.Year == period.Year && p.Id != id)
+            .Select(p => p.Id)
+            .ToListAsync(ct);
+
+        if (yearPeriodIds.Count > 0)
+        {
+            var yearDayResults = await _db.DayResults.AsNoTracking()
+                .Where(r => yearPeriodIds.Contains(r.PeriodId) && empIds.Contains(r.EmployeeId) && !r.OutOfEmployment && !string.IsNullOrEmpty(r.Code))
+                .ToListAsync(ct);
+
+            foreach (var r in yearDayResults)
+            {
+                if (codes.TryGetValue(r.Code!, out var cd) && cd.AnnualLeaveValue > 0)
+                {
+                    if (yearlyLeaveByMonth.TryGetValue(r.EmployeeId, out var mDict))
+                    {
+                        mDict[r.Date.Month] += cd.AnnualLeaveValue;
+                    }
+                }
+            }
+        }
+
+        // 2. Điền kết quả của kỳ hiện tại từ dayResults
+        foreach (var r in dayResults)
+        {
+            if (!r.OutOfEmployment && !string.IsNullOrEmpty(r.Code) && codes.TryGetValue(r.Code, out var cd) && cd.AnnualLeaveValue > 0)
+            {
+                if (yearlyLeaveByMonth.TryGetValue(r.EmployeeId, out var mDict))
+                {
+                    mDict[r.Date.Month] += cd.AnnualLeaveValue;
+                }
+            }
+        }
+
         bool isDraft = period.Status != PeriodStatus.Closed;
-        var bytes = _exportService.ExportAttendanceSheet(company, period, employees, depts, dayResults, notes, codes, isDraft);
+        var leaveFundsList = await _leaveService.GetCompanyLeaveFundsAsync(company.Id, period.Year, period.Month, ct);
+        var leaveBalances = leaveFundsList.ToDictionary(f => f.EmployeeId);
+        var bytes = _exportService.ExportAttendanceSheet(company, period, employees, depts, dayResults, notes, codes, isDraft, yearlyLeaveByMonth, leaveBalances);
 
         var fileName = $"BCC_{company.Code}_{period.Year}_{period.Month:00}.xlsx";
 

@@ -77,18 +77,31 @@ export const OperatorWorkflowView: React.FC = () => {
 
   const handleDeletePeriod = async () => {
     if (!selectedPeriod) return;
+    const periodLabel = `Tháng ${String(selectedPeriod.month).padStart(2, '0')}/${selectedPeriod.year}`;
     const confirmed = await toast.confirm({
-      title: `Xóa toàn bộ kỳ chấm công Tháng ${String(selectedPeriod.month).padStart(2, '0')}/${selectedPeriod.year}`,
-      message: `CẢNH BÁO NGUY HIỂM: Hành động này sẽ xóa vĩnh viễn toàn bộ kỳ công này bao gồm: bảng tính công (DayResults), dữ liệu quẹt thô (RawPunches), các đợt nạp file (ImportBatches) và mọi ghi chú. Bạn có chắc chắn muốn xóa không?`,
-      confirmText: 'Xóa vĩnh viễn kỳ công',
+      title: `Xác nhận xóa hoàn toàn Kỳ công ${periodLabel}`,
+      message: `CẢNH BÁO NGUY HIỂM: Hành động này sẽ xóa vĩnh viễn kỳ công ${periodLabel} và TOÀN BỘ dữ liệu liên quan:
+• Bảng kết quả chấm công từng ngày (DayResults) & bản sao lưu thủ công
+• Dữ liệu quẹt vân tay / quẹt thô (RawPunches) & các tệp import Excel (ImportBatches)
+• Biến động sổ cái phép phát sinh trong kỳ (LeaveLedger) & hoàn tác +1 ngày phép năm (nếu đã chốt)
+• Các bản công bố bảng công (TimesheetPublications) & khiếu nại nhân viên (TimesheetDisputes)
+• Lịch sử xuất Excel & ghi chú liên quan
+
+Sau khi xóa hoàn toàn, bạn có thể tạo lại kỳ công mới cho ${periodLabel} để nạp lại dữ liệu và tính công từ đầu. Bạn có chắc chắn muốn xóa không?`,
+      confirmText: 'Xác nhận xóa hoàn toàn',
       type: 'danger'
     });
     if (!confirmed) return;
 
     try {
-      const res = await api.delete(`/periods/${selectedPeriod.id}`);
-      toast.success(res.data?.message || 'Đã xóa toàn bộ dữ liệu kỳ công thành công.');
+      const monthToRecreate = selectedPeriod.month;
+      const yearToRecreate = selectedPeriod.year;
+
+      const res = await api.delete(`/periods/${selectedPeriod.id}?force=true`);
+      toast.success(res.data?.message || `Đã xóa hoàn toàn dữ liệu kỳ công ${periodLabel} thành công.`);
       setSelectedPeriod(null);
+      setNewMonth(monthToRecreate);
+      setNewYear(yearToRecreate);
       await fetchPeriods();
     } catch (err: any) {
       toast.error(err.response?.data?.message || 'Lỗi khi xóa kỳ chấm công.');

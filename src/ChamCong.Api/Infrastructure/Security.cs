@@ -79,6 +79,7 @@ public interface ITokenService
     string GenerateToken(User user, IEnumerable<int> companyIds);
     string GenerateAccessToken(User user, IEnumerable<string> roles, IEnumerable<int> companyIds, TimeSpan? lifetime = null);
     (string RawToken, string TokenHash) GenerateRefreshToken();
+    ClaimsPrincipal? ValidateToken(string token);
 }
 
 public class TokenService : ITokenService
@@ -160,5 +161,35 @@ public class TokenService : ITokenService
         var raw = CryptoUtil.GenerateRandomSecret(32);
         var hash = CryptoUtil.Sha256Hex(raw);
         return (raw, hash);
+    }
+
+    public ClaimsPrincipal? ValidateToken(string token)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return null;
+        try
+        {
+            var tokenHandler = new JwtSecurityTokenHandler();
+            var key = GetSecurityKey();
+            var issuer = Environment.GetEnvironmentVariable("JWT_ISSUER") ?? _config["Jwt:Issuer"] ?? "ChamCongApp";
+            var audience = Environment.GetEnvironmentVariable("JWT_AUDIENCE") ?? _config["Jwt:Audience"] ?? "ChamCongUsers";
+
+            var validationParameters = new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = key,
+                ValidateIssuer = true,
+                ValidIssuer = issuer,
+                ValidateAudience = true,
+                ValidAudience = audience,
+                ClockSkew = TimeSpan.FromMinutes(5)
+            };
+
+            var principal = tokenHandler.ValidateToken(token, validationParameters, out _);
+            return principal;
+        }
+        catch
+        {
+            return null;
+        }
     }
 }

@@ -15,7 +15,9 @@ public interface IExcelExportService
         List<DayResult> dayResults,
         Dictionary<int, string> periodNotes,
         Dictionary<string, CodeDef> codes,
-        bool isDraft);
+        bool isDraft,
+        Dictionary<int, Dictionary<int, decimal>>? yearlyLeaveByMonth = null,
+        Dictionary<int, LeaveBalanceDetailDto>? leaveBalances = null);
 
     byte[] ExportWarningsSheet(
         Company company,
@@ -37,7 +39,9 @@ public class ExcelExportService : IExcelExportService
         List<DayResult> dayResults,
         Dictionary<int, string> periodNotes,
         Dictionary<string, CodeDef> codes,
-        bool isDraft)
+        bool isDraft,
+        Dictionary<int, Dictionary<int, decimal>>? yearlyLeaveByMonth = null,
+        Dictionary<int, LeaveBalanceDetailDto>? leaveBalances = null)
     {
         using var workbook = new XLWorkbook();
         var ws1 = workbook.Worksheets.Add("Chấm công");
@@ -78,13 +82,13 @@ public class ExcelExportService : IExcelExportService
         ws1.Cell(row, 1).Style.Font.Bold = true;
         ws1.Cell(row, 1).Style.Font.FontSize = 14;
 
-        // Ô Số ngày làm việc tháng ở góc phải (cột 13 & 14)
-        ws1.Cell(row, 13).Value = "Số ngày làm việc tháng:";
-        ws1.Cell(row, 13).Style.Font.Bold = true;
-        ws1.Cell(row, 14).Value = period.StandardDays;
+        // Ô Số ngày làm việc tháng ở góc phải (cột 14 & 15)
+        ws1.Cell(row, 14).Value = "Số ngày làm việc tháng:";
         ws1.Cell(row, 14).Style.Font.Bold = true;
-        ws1.Cell(row, 14).Style.NumberFormat.Format = "0.##";
-        string stdDaysCell = $"N{row}"; // Cột N dòng 2
+        ws1.Cell(row, 15).Value = period.StandardDays;
+        ws1.Cell(row, 15).Style.Font.Bold = true;
+        ws1.Cell(row, 15).Style.NumberFormat.Format = "0.##";
+        string stdDaysCell = $"O{row}"; // Cột O dòng 2
         row++;
 
         // 3 dòng tiêu đề:
@@ -113,12 +117,13 @@ public class ExcelExportService : IExcelExportService
         SetStaticHeader(9, "Ngày lễ", "", 9);
         SetStaticHeader(10, "Số ngày công làm việc", "", 10);
         SetStaticHeader(11, "Nghỉ phép năm", "", 11);
-        SetStaticHeader(12, "Nghỉ hưởng lương", "", 12);
-        SetStaticHeader(13, "Nghỉ trừ lương", "", 13);
-        SetStaticHeader(14, "Số ngày công tính lương", "", 14);
+        SetStaticHeader(12, "Phép năm còn lại", "", 12);
+        SetStaticHeader(13, "Nghỉ hưởng lương", "", 13);
+        SetStaticHeader(14, "Nghỉ không lương", "", 14);
+        SetStaticHeader(15, "Số ngày công tính lương", "", 15);
 
-        int curCol = 15;
-        int colNumCounter = 15;
+        int curCol = 16;
+        int colNumCounter = 16;
         int firstDateCol = curCol;
 
         // Các cột ngày
@@ -234,18 +239,24 @@ public class ExcelExportService : IExcelExportService
             ws1.Cell(row, 11).FormulaA1 = $"COUNTIF({dateRangeStr}, \"P\") + COUNTIF({dateRangeStr}, \"BL\") + 0.5 * (COUNTIF({dateRangeStr}, \"P/2\") + COUNTIF({dateRangeStr}, \"P/2K\") + COUNTIF({dateRangeStr}, \"BL/2\"))";
             ws1.Cell(row, 11).Style.NumberFormat.Format = "0.0";
 
-            // L (col 12) Nghỉ hưởng lương = COUNTIF(K)
-            ws1.Cell(row, 12).FormulaA1 = $"COUNTIF({dateRangeStr}, \"K\")";
-            ws1.Cell(row, 12).Style.NumberFormat.Format = "0.0";
+            // L (col 12) Phép năm còn lại = liên kết tới cột Y (Tồn phép tại T{period.Month}) trong Sheet "Phép năm"
+            int row3InSheet3 = 7 + (row - dataStartRow1);
+            ws1.Cell(row, 12).FormulaA1 = $"'Phép năm'!Y{row3InSheet3}";
+            ws1.Cell(row, 12).Style.NumberFormat.Format = "0.#";
+            ws1.Cell(row, 12).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
 
-            // N (col 14) Số ngày công tính lương = H + I + K + L
-            ws1.Cell(row, 14).FormulaA1 = $"H{row}+I{row}+K{row}+L{row}";
-            ws1.Cell(row, 14).Style.NumberFormat.Format = "0.0";
-            ws1.Cell(row, 14).Style.Font.Bold = true;
-
-            // M (col 13) Nghỉ trừ lương = MAX(0, StandardDays - N)
-            ws1.Cell(row, 13).FormulaA1 = $"MAX(0, {stdDaysCell}-N{row})";
+            // M (col 13) Nghỉ hưởng lương = COUNTIF(K)
+            ws1.Cell(row, 13).FormulaA1 = $"COUNTIF({dateRangeStr}, \"K\")";
             ws1.Cell(row, 13).Style.NumberFormat.Format = "0.0";
+
+            // O (col 15) Số ngày công tính lương = H + I + K + M
+            ws1.Cell(row, 15).FormulaA1 = $"H{row}+I{row}+K{row}+M{row}";
+            ws1.Cell(row, 15).Style.NumberFormat.Format = "0.0";
+            ws1.Cell(row, 15).Style.Font.Bold = true;
+
+            // N (col 14) Nghỉ không lương = MAX(0, StandardDays - O)
+            ws1.Cell(row, 14).FormulaA1 = $"MAX(0, {stdDaysCell}-O{row})";
+            ws1.Cell(row, 14).Style.NumberFormat.Format = "0.0";
 
             // Ghi chú mặc định là để trống
             var note = periodNotes.TryGetValue(emp.Id, out var pn) && !string.IsNullOrWhiteSpace(pn)
@@ -263,12 +274,12 @@ public class ExcelExportService : IExcelExportService
         ws1.Cell(row, 1).Style.Font.Bold = true;
         ws1.Cell(row, 1).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
 
-        for (int col = 5; col <= 14; col++)
+        for (int col = 5; col <= 15; col++)
         {
             var colLetter = XLHelper.GetColumnLetterFromNumber(col);
             ws1.Cell(row, col).FormulaA1 = $"SUM({colLetter}{dataStartRow1}:{colLetter}{dataEndRow1})";
             ws1.Cell(row, col).Style.Font.Bold = true;
-            ws1.Cell(row, col).Style.NumberFormat.Format = "0.0";
+            ws1.Cell(row, col).Style.NumberFormat.Format = col == 12 ? "0.#" : "0.0";
         }
 
         var dataRange1 = ws1.Range(dataStartRow1, 1, row, noteCol);
@@ -278,7 +289,9 @@ public class ExcelExportService : IExcelExportService
 
         // Tối ưu độ rộng cột Sheet 1
         ws1.Columns(1, 4).AdjustToContents(15, 35);
-        ws1.Columns(5, noteCol - 1).Width = 6.5;
+        ws1.Columns(5, 7).Width = 7;
+        ws1.Columns(8, 15).Width = 11;
+        ws1.Columns(16, noteCol - 1).Width = 6.5;
         ws1.Column(noteCol).Width = 25;
 
         // -------------------------------------------------------------
@@ -465,6 +478,315 @@ public class ExcelExportService : IExcelExportService
         ws2.Columns(5, 8).Width = 10;
         ws2.Columns(9, 10).Width = 12;
         ws2.Columns(firstDateCol2, lastDateCol2).Width = 6.5;
+
+        // -------------------------------------------------------------
+        // KHỐI 3: BẢNG THEO DÕI PHÉP NĂM (Sheet: "Phép năm")
+        // -------------------------------------------------------------
+        var ws3 = workbook.Worksheets.Add("Phép năm");
+        ws3.Style.Font.FontName = FontName;
+        ws3.Style.Font.FontSize = 10;
+
+        // Dòng 1: Tên công ty
+        ws3.Cell(1, 1).Value = company.Name.ToUpper();
+        ws3.Cell(1, 1).Style.Font.Bold = true;
+        ws3.Cell(1, 1).Style.Font.FontSize = 12;
+
+        // Dòng 2: Tiêu đề bảng & Ô W2 chứa số tháng còn lại trong năm (12 - period.Month)
+        ws3.Cell(2, 1).Value = $"BẢNG THEO DÕI PHÉP NĂM {period.Year}";
+        ws3.Cell(2, 1).Style.Font.Bold = true;
+        ws3.Cell(2, 1).Style.Font.FontSize = 14;
+
+        int remainingMonths = Math.Max(0, 12 - period.Month);
+        ws3.Cell(2, 23).Value = remainingMonths; // Cột W dòng 2 ($W$2)
+        ws3.Cell(2, 23).Style.Font.Bold = true;
+        ws3.Cell(2, 23).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+        ws3.Cell(2, 22).Value = "Số tháng còn lại:";
+        ws3.Cell(2, 22).Style.Font.Italic = true;
+        ws3.Cell(2, 22).Style.Font.FontSize = 9;
+        ws3.Cell(2, 22).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Right;
+
+        // Merge Header hàng 4 và hàng 5
+        ws3.Range(4, 1, 5, 1).Merge().Value = "TT";
+        ws3.Range(4, 2, 5, 2).Merge().Value = "Mã";
+        ws3.Range(4, 3, 5, 3).Merge().Value = "Họ tên";
+        ws3.Range(4, 4, 5, 4).Merge().Value = "BP";
+        ws3.Range(4, 5, 5, 5).Merge().Value = "Ngày vào";
+        ws3.Range(4, 6, 5, 6).Merge().Value = "Ngày tính";
+        ws3.Range(4, 7, 5, 7).Merge().Value = "Thâm niên";
+        ws3.Range(4, 8, 5, 8).Merge().Value = "Phép năm (Đầu kỳ)";
+        ws3.Range(4, 9, 5, 9).Merge().Value = $"Tích lũy (Đến T{period.Month})";
+        ws3.Range(4, 10, 5, 10).Merge().Value = "Tổng phép hưởng";
+
+        // Merge 12 cột tháng (K đến V, tức cột 11 đến 22)
+        ws3.Range(4, 11, 4, 22).Merge().Value = $"Số ngày nghỉ phép trong năm-{period.Year}";
+        for (int m = 1; m <= 12; m++)
+        {
+            var cellMonth = ws3.Cell(5, 10 + m);
+            cellMonth.Value = $"T{m}";
+            if (m == period.Month)
+            {
+                cellMonth.Style.Fill.BackgroundColor = XLColor.FromHtml("#FEF3C7");
+                cellMonth.Style.Font.Bold = true;
+            }
+        }
+
+        ws3.Range(4, 23, 5, 23).Merge().Value = $"Đã dùng trong T{period.Month}";
+        ws3.Range(4, 24, 5, 24).Merge().Value = $"Dùng lũy kế (T1-T{period.Month})";
+        ws3.Range(4, 25, 5, 25).Merge().Value = $"Tồn phép (Tại T{period.Month})";
+        ws3.Range(4, 26, 5, 26).Merge().Value = "Mức lương tính phép năm";
+        ws3.Range(4, 27, 5, 27).Merge().Value = "Lương phép năm";
+
+        // Dòng 6: Đánh số thứ tự cột
+        ws3.Cell(6, 2).Value = 1;   // Mã
+        ws3.Cell(6, 3).Value = 2;   // Họ tên
+        ws3.Cell(6, 5).Value = 3;   // Ngày vào
+        ws3.Cell(6, 6).Value = 4;   // Ngày tính
+        ws3.Cell(6, 7).Value = 5;   // Thâm niên
+        ws3.Cell(6, 8).Value = 6;   // Phép năm (Đầu kỳ)
+        ws3.Cell(6, 9).Value = 7;   // Tích lũy (Đến T...)
+        ws3.Cell(6, 10).Value = 8;  // Tổng phép hưởng
+        for (int colNum = 9; colNum <= 20; colNum++)
+        {
+            ws3.Cell(6, 2 + colNum).Value = colNum; // K6 (9) .. V6 (20)
+        }
+        ws3.Cell(6, 23).Value = 21; // W6: Đã dùng trong T...
+        ws3.Cell(6, 24).Value = 22; // X6: Dùng lũy kế
+        ws3.Cell(6, 25).Value = 23; // Y6: Tồn phép (Tại T...)
+
+        // Style toàn bộ Header (Row 4..6, Col 1..27)
+        var headerRange3 = ws3.Range(4, 1, 5, 27);
+        headerRange3.Style.Font.Bold = true;
+        headerRange3.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+        headerRange3.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+        headerRange3.Style.Alignment.WrapText = true;
+        headerRange3.Style.Fill.BackgroundColor = XLColor.FromHtml("#FFF2CC");
+        headerRange3.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
+        headerRange3.Style.Border.InsideBorder = XLBorderStyleValues.Thin;
+
+        var row6Range = ws3.Range(6, 1, 6, 27);
+        row6Range.Style.Font.Bold = true;
+        row6Range.Style.Font.FontSize = 9;
+        row6Range.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+        row6Range.Style.Alignment.Vertical = XLAlignmentVerticalValues.Center;
+        row6Range.Style.Fill.BackgroundColor = XLColor.FromHtml("#F2F2F2");
+        row6Range.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
+        row6Range.Style.Border.InsideBorder = XLBorderStyleValues.Thin;
+
+        int row3 = 7;
+        int dataStartRow3 = row3;
+        int stt3 = 1;
+        DateTime calcDate = period.ToDate; // Ngày tính thâm niên
+
+        foreach (var emp in employees.OrderBy(e => e.SortOrder).ThenBy(e => e.Id))
+        {
+            // A: STT
+            ws3.Cell(row3, 1).Value = stt3++;
+            ws3.Cell(row3, 1).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+            // B: Mã
+            ws3.Cell(row3, 2).Value = emp.EmployeeCode;
+            ws3.Cell(row3, 2).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+            // C: Họ tên
+            ws3.Cell(row3, 3).Value = emp.FullName;
+            ws3.Cell(row3, 3).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Left;
+
+            // D: BP
+            var deptName = emp.DepartmentId.HasValue && departments.TryGetValue(emp.DepartmentId.Value, out var dp) ? dp.Name : "";
+            ws3.Cell(row3, 4).Value = deptName;
+            ws3.Cell(row3, 4).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+            // E: Ngày vào (StartDate)
+            if (emp.StartDate != default)
+            {
+                ws3.Cell(row3, 5).Value = emp.StartDate.Date;
+                ws3.Cell(row3, 5).Style.DateFormat.Format = "dd/MM/yyyy";
+            }
+            else
+            {
+                ws3.Cell(row3, 5).Value = Blank.Value;
+            }
+            ws3.Cell(row3, 5).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+            // F: Ngày tính (calcDate)
+            ws3.Cell(row3, 6).Value = calcDate.Date;
+            ws3.Cell(row3, 6).Style.DateFormat.Format = "dd/MM/yyyy";
+            ws3.Cell(row3, 6).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+            // G: Thâm niên = ROUND((F7-E7)/365,0)
+            ws3.Cell(row3, 7).FormulaA1 = $"ROUND((F{row3}-E{row3})/365,0)";
+            ws3.Cell(row3, 7).Style.NumberFormat.Format = "0";
+            ws3.Cell(row3, 7).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+            // Lấy thông tin số dư phép năm thực tế từ DB
+            LeaveBalanceDetailDto? bal = null;
+            leaveBalances?.TryGetValue(emp.Id, out bal);
+
+            decimal openVal = bal != null ? (bal.AnnualOpening + bal.CarryOpening) : 0m;
+            decimal accruedVal = bal != null ? bal.Accrued : period.Month;
+
+            // H: Phép năm (Đầu kỳ)
+            ws3.Cell(row3, 8).Value = openVal;
+            ws3.Cell(row3, 8).Style.NumberFormat.Format = "0.#";
+            ws3.Cell(row3, 8).Style.Font.Bold = true;
+            ws3.Cell(row3, 8).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+            // I: Tích lũy (Đến T{period.Month})
+            ws3.Cell(row3, 9).Value = accruedVal;
+            ws3.Cell(row3, 9).Style.NumberFormat.Format = "0.#";
+            ws3.Cell(row3, 9).Style.Font.Bold = true;
+            ws3.Cell(row3, 9).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+            ws3.Cell(row3, 9).Style.Fill.BackgroundColor = XLColor.FromHtml("#F0FDF4");
+
+            // J: Tổng phép hưởng = H + I
+            ws3.Cell(row3, 10).FormulaA1 = $"H{row3}+I{row3}";
+            ws3.Cell(row3, 10).Style.NumberFormat.Format = "0.#";
+            ws3.Cell(row3, 10).Style.Font.Bold = true;
+            ws3.Cell(row3, 10).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+            // K..V: 12 tháng từ T1 đến T12 (cột 11 đến 22)
+            Dictionary<int, decimal>? monthsMap = null;
+            yearlyLeaveByMonth?.TryGetValue(emp.Id, out monthsMap);
+
+            for (int m = 1; m <= 12; m++)
+            {
+                int colIdx = 10 + m; // 11..22
+                decimal leaveDaysInMonth = 0m;
+                if (m <= period.Month && monthsMap != null && monthsMap.TryGetValue(m, out var val))
+                {
+                    leaveDaysInMonth = val;
+                }
+
+                if (m <= period.Month && leaveDaysInMonth > 0)
+                {
+                    ws3.Cell(row3, colIdx).Value = leaveDaysInMonth;
+                    ws3.Cell(row3, colIdx).Style.NumberFormat.Format = "0.#";
+                }
+                else
+                {
+                    ws3.Cell(row3, colIdx).Value = Blank.Value;
+                }
+
+                if (m == period.Month)
+                {
+                    ws3.Cell(row3, colIdx).Style.Fill.BackgroundColor = XLColor.FromHtml("#FEF3C7");
+                }
+                ws3.Cell(row3, colIdx).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+            }
+
+            // W: Đã dùng trong T{period.Month} = Cột tương ứng của tháng hiện tại
+            string curMonthColLetter = XLHelper.GetColumnLetterFromNumber(10 + period.Month);
+            ws3.Cell(row3, 23).FormulaA1 = $"{curMonthColLetter}{row3}";
+            ws3.Cell(row3, 23).Style.NumberFormat.Format = "0.#";
+            ws3.Cell(row3, 23).Style.Font.Bold = true;
+            ws3.Cell(row3, 23).Style.Fill.BackgroundColor = XLColor.FromHtml("#FEF3C7");
+            ws3.Cell(row3, 23).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+            // X: Dùng lũy kế (T1-T{period.Month}) = SUM(K..{curMonthColLetter})
+            ws3.Cell(row3, 24).FormulaA1 = $"SUM(K{row3}:{curMonthColLetter}{row3})";
+            ws3.Cell(row3, 24).Style.NumberFormat.Format = "0.#";
+            ws3.Cell(row3, 24).Style.Font.Bold = true;
+            ws3.Cell(row3, 24).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+            // Y: Tồn phép (Tại T{period.Month}) = IF((J - X) < 0, 0, J - X)
+            ws3.Cell(row3, 25).FormulaA1 = $"IF((J{row3}-X{row3})<0, 0, J{row3}-X{row3})";
+            ws3.Cell(row3, 25).Style.NumberFormat.Format = "0.#";
+            ws3.Cell(row3, 25).Style.Font.Bold = true;
+            ws3.Cell(row3, 25).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+            // Z: Mức lương tính phép năm
+            ws3.Cell(row3, 26).Value = Blank.Value;
+
+            // AA: Lương phép năm
+            ws3.Cell(row3, 27).Value = Blank.Value;
+
+            row3++;
+        }
+
+        int dataEndRow3 = row3 - 1;
+
+        // Dòng CỘNG
+        ws3.Cell(row3, 1).Value = "CỘNG";
+        ws3.Range(row3, 1, row3, 4).Merge();
+        ws3.Cell(row3, 1).Style.Font.Bold = true;
+        ws3.Cell(row3, 1).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+        // Tổng H (Phép năm Đầu kỳ)
+        ws3.Cell(row3, 8).FormulaA1 = $"SUM(H{dataStartRow3}:H{dataEndRow3})";
+        ws3.Cell(row3, 8).Style.Font.Bold = true;
+        ws3.Cell(row3, 8).Style.NumberFormat.Format = "0.#";
+        ws3.Cell(row3, 8).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+        // Tổng I (Tích lũy)
+        ws3.Cell(row3, 9).FormulaA1 = $"SUM(I{dataStartRow3}:I{dataEndRow3})";
+        ws3.Cell(row3, 9).Style.Font.Bold = true;
+        ws3.Cell(row3, 9).Style.NumberFormat.Format = "0.#";
+        ws3.Cell(row3, 9).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+        // Tổng J (Tổng phép hưởng)
+        ws3.Cell(row3, 10).FormulaA1 = $"SUM(J{dataStartRow3}:J{dataEndRow3})";
+        ws3.Cell(row3, 10).Style.Font.Bold = true;
+        ws3.Cell(row3, 10).Style.NumberFormat.Format = "0.#";
+        ws3.Cell(row3, 10).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+        // Tổng K..V: Chỉ hiển thị tổng cho các tháng tới kỳ công hiện tại (m <= period.Month)
+        for (int m = 1; m <= 12; m++)
+        {
+            int colIdx = 10 + m;
+            if (m <= period.Month)
+            {
+                var colL = XLHelper.GetColumnLetterFromNumber(colIdx);
+                ws3.Cell(row3, colIdx).FormulaA1 = $"SUM({colL}{dataStartRow3}:{colL}{dataEndRow3})";
+                ws3.Cell(row3, colIdx).Style.Font.Bold = true;
+                ws3.Cell(row3, colIdx).Style.NumberFormat.Format = "0.#";
+            }
+            else
+            {
+                ws3.Cell(row3, colIdx).Value = Blank.Value;
+            }
+            ws3.Cell(row3, colIdx).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+        }
+
+        // Tổng W (Đã dùng trong T...)
+        ws3.Cell(row3, 23).FormulaA1 = $"SUM(W{dataStartRow3}:W{dataEndRow3})";
+        ws3.Cell(row3, 23).Style.Font.Bold = true;
+        ws3.Cell(row3, 23).Style.NumberFormat.Format = "0.#";
+        ws3.Cell(row3, 23).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+        // Tổng X (Dùng lũy kế)
+        ws3.Cell(row3, 24).FormulaA1 = $"SUM(X{dataStartRow3}:X{dataEndRow3})";
+        ws3.Cell(row3, 24).Style.Font.Bold = true;
+        ws3.Cell(row3, 24).Style.NumberFormat.Format = "0.#";
+        ws3.Cell(row3, 24).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+        // Tổng Y (Tồn phép Tại T...)
+        ws3.Cell(row3, 25).FormulaA1 = $"SUM(Y{dataStartRow3}:Y{dataEndRow3})";
+        ws3.Cell(row3, 25).Style.Font.Bold = true;
+        ws3.Cell(row3, 25).Style.NumberFormat.Format = "0.#";
+        ws3.Cell(row3, 25).Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+
+        var dataRange3 = ws3.Range(dataStartRow3, 1, row3, 27);
+        dataRange3.Style.Border.InsideBorder = XLBorderStyleValues.Thin;
+        dataRange3.Style.Border.OutsideBorder = XLBorderStyleValues.Thin;
+        ws3.Range(row3, 1, row3, 27).Style.Fill.BackgroundColor = XLColor.FromHtml("#E2EFDA");
+
+        // Độ rộng cột Sheet 3
+        ws3.Column(1).Width = 5;
+        ws3.Column(2).Width = 10;
+        ws3.Column(3).Width = 24;
+        ws3.Column(4).Width = 16;
+        ws3.Column(5).Width = 13;
+        ws3.Column(6).Width = 13;
+        ws3.Column(7).Width = 11;
+        ws3.Column(8).Width = 15; // Phép năm (Đầu kỳ)
+        ws3.Column(9).Width = 16; // Tích lũy (Đến T...)
+        ws3.Column(10).Width = 16; // Tổng phép hưởng
+        ws3.Columns(11, 22).Width = 7; // T1..T12
+        ws3.Column(23).Width = 16; // Đã dùng trong T...
+        ws3.Column(24).Width = 16; // Dùng lũy kế
+        ws3.Column(25).Width = 16; // Tồn phép (Tại T...)
+        ws3.Column(26).Width = 12;
+        ws3.Column(27).Width = 12;
 
         using var ms = new MemoryStream();
         workbook.SaveAs(ms);

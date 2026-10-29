@@ -55,21 +55,22 @@ public static class Codes
     public const string AnnualHalfUnpaid = "P/2K";
     public const string Comp = "BL";
     public const string CompHalf = "BL/2";
-    public const string Absent = "N";
-    public const string UnpaidLeave = "NL";
+    public const string Absent = "KP";
     public const string PaidLeave = "K";
+    public const string UnpaidLeave = "KL";
     public const string Missing = "?";
-    public const string Vacant = "V";
+    public const string Vacant = "KP"; // Không Phép (trước đây là V / Vắng mặt)
+    public const string OldVacant = "V";
 
     public static readonly string[] SystemCodes =
     {
         Full, Half, Holiday, HalfHoliday, Annual, AnnualHalf, AnnualHalfUnpaid,
-        Comp, CompHalf, Absent, UnpaidLeave, PaidLeave, Missing, Vacant
+        Comp, CompHalf, Absent, PaidLeave, UnpaidLeave, Missing, Vacant
     };
 
-    public static bool NeedsExplanation(string? code) => code == Missing || code == Vacant;
+    public static bool NeedsExplanation(string? code) => code == Missing || code == Vacant || code == "V" || code == "KP" || code == "N";
 
-    /// <summary>Bảng mã mặc định khởi tạo từ file Excel (13 dòng; ?/V tách 2 mã).</summary>
+    /// <summary>Bảng mã mặc định khởi tạo từ file Excel (14 dòng; ?/V tách 2 mã).</summary>
     public static List<CodeDef> Defaults() => new()
     {
         new() { Code = Full, Name = "Đi làm đủ ngày công", WorkValue = 1m, SortOrder = 1, IsSystem = true,
@@ -93,16 +94,14 @@ public static class Codes
         new() { Code = CompHalf, Name = "Nghỉ bù 1/2 ngày", AnnualLeaveValue = 0.5m, WorkValue = 0.5m, IsHalfLeave = true,
             FundType = FundType.Comp, FundDeduct = 0.5m, SortOrder = 9, IsSystem = true,
             Condition = "Nghỉ bù 0.5 + đi làm thực tế ≥ 3.5h", Color = "E8DAF4" },
-        new() { Code = Absent, Name = "Nghỉ việc không xin phép", SortOrder = 10, IsSystem = true,
-            Condition = "Nghỉ không lương có đơn hoặc vắng mặt không phép", Color = "BFBFBF" },
-        new() { Code = UnpaidLeave, Name = "Nghỉ phép không hưởng lương", SortOrder = 11, IsSystem = true,
-            Condition = "Chế độ nghỉ không hưởng lương theo Luật Lao động", Color = "D9D9D9" },
-        new() { Code = PaidLeave, Name = "Nghỉ phép có hưởng lương", PaidLeaveValue = 1m, SortOrder = 12, IsSystem = true,
+        new() { Code = PaidLeave, Name = "Nghỉ phép có hưởng lương", PaidLeaveValue = 1m, SortOrder = 10, IsSystem = true,
             Condition = "Chế độ nghỉ có hưởng lương theo Luật Lao động", Color = "C6E0B4" },
-        new() { Code = Missing, Name = "Nghi vấn thiếu quẹt", SortOrder = 13, IsSystem = true,
+        new() { Code = UnpaidLeave, Name = "Nghỉ không hưởng lương", SortOrder = 11, IsSystem = true,
+            Condition = "Đã hết phép năm hoặc nghỉ việc riêng không hưởng lương; có đơn xin phép được duyệt", Color = "E2EFDA" },
+        new() { Code = Missing, Name = "Nghi vấn thiếu quẹt", SortOrder = 12, IsSystem = true,
             Condition = "Chỉ có 1 lượt quẹt; xuất danh sách giải trình", Color = "FFD966" },
-        new() { Code = Vacant, Name = "Vắng (không quẹt)", SortOrder = 14, IsSystem = true,
-            Condition = "Không có lượt quẹt nào; xuất danh sách giải trình", Color = "F4B183" },
+        new() { Code = Vacant, Name = "Không Phép (KP)", SortOrder = 13, IsSystem = true,
+            Condition = "Không có lượt quẹt nào hoặc vắng không phép; xuất danh sách giải trình", Color = "F4B183" },
     };
 }
 

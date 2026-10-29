@@ -66,7 +66,7 @@ public class TimesheetPublicationService : ITimesheetPublicationService
                            l.WorkDate <= period.ToDate &&
                            l.ReviewState == "PENDING", ct);
 
-        if (pendingFlags)
+        if (period.Status != PeriodStatus.Closed && pendingFlags)
         {
             throw AppException.Bad("Không thể công bố vì vẫn còn lượt chấm công đang chờ HCNS duyệt cờ trong kỳ này.");
         }
@@ -165,10 +165,12 @@ public class TimesheetPublicationService : ITimesheetPublicationService
                 _db.Notifications.Add(new Notification
                 {
                     UserId = user.Id,
-                    Title = $"Bảng chấm công Tháng {period.Month}/{period.Year} đã được công bố",
-                    Body = $"HCNS đã công bố bảng chấm công chính thức (Phiên bản {nextVer}). Bạn có 3 ngày để kiểm tra và gửi khiếu nại nếu có thắc mắc.",
+                    CompanyId = comp.Id,
+                    BranchCode = branchCode,
+                    Title = $"Bảng chấm công Tháng {period.Month:00}/{period.Year} đã được chốt",
+                    Body = $"HCNS đã hoàn tất chốt kỳ công Tháng {period.Month:00}/{period.Year}. Bạn có thể vào xem chi tiết chấm công, ngày phép, ngày trễ và phép năm còn lại.",
                     LinkType = "TIMESHEET",
-                    LinkId = pub.PublicationId,
+                    LinkId = period.Id,
                     IsRead = false,
                     CreatedAtUtc = DateTime.UtcNow
                 });
@@ -251,6 +253,39 @@ public class TimesheetPublicationService : ITimesheetPublicationService
         _db.TimesheetDisputes.Add(dispute);
         await _db.SaveChangesAsync(ct);
 
+        // Tạo thông báo cho HCNS & Quản trị viên phụ trách hội sở này
+        var period = await _db.Periods.FirstOrDefaultAsync(p => p.Id == pub.PeriodId, ct);
+        int? companyId = period?.CompanyId;
+        string? branchCode = pub.BranchCode;
+        if (!companyId.HasValue && !string.IsNullOrEmpty(branchCode))
+        {
+            var comp = await _db.Companies.FirstOrDefaultAsync(c => c.Code == branchCode, ct);
+            companyId = comp?.Id;
+        }
+
+        var hrQuery = _db.Users.Where(u => u.Role == "HR" || u.Role == "Admin");
+        if (companyId.HasValue)
+        {
+            hrQuery = hrQuery.Where(u => u.Companies.Any(c => c.CompanyId == companyId.Value) || (u.Role == "Admin" && !u.Companies.Any()));
+        }
+        var hrUsers = await hrQuery.ToListAsync(ct);
+        foreach (var hr in hrUsers)
+        {
+            _db.Notifications.Add(new Notification
+            {
+                UserId = hr.Id,
+                CompanyId = companyId,
+                BranchCode = branchCode,
+                Title = "Khiếu nại bảng chấm công mới",
+                Body = $"Nhân viên {employeeCode} vừa gửi khiếu nại bảng công kỳ Tháng {period?.Month:00}/{period?.Year}.",
+                LinkType = "DISPUTE",
+                LinkId = dispute.DisputeId,
+                IsRead = false,
+                CreatedAtUtc = DateTime.UtcNow
+            });
+        }
+        await _db.SaveChangesAsync(ct);
+
         return dispute;
     }
 
@@ -264,6 +299,16 @@ public class TimesheetPublicationService : ITimesheetPublicationService
         dispute.HRResponse = response;
         dispute.ResolvedAtUtc = DateTime.UtcNow;
 
+        var pub = await _db.TimesheetPublications.FirstOrDefaultAsync(p => p.PublicationId == dispute.PublicationId, ct);
+        var period = pub != null ? await _db.Periods.FirstOrDefaultAsync(p => p.Id == pub.PeriodId, ct) : null;
+        int? companyId = period?.CompanyId;
+        string? branchCode = pub?.BranchCode;
+        if (!companyId.HasValue && !string.IsNullOrEmpty(branchCode))
+        {
+            var comp = await _db.Companies.FirstOrDefaultAsync(c => c.Code == branchCode, ct);
+            companyId = comp?.Id;
+        }
+
         // Gửi thông báo cho nhân viên
         var user = await _db.Users.FirstOrDefaultAsync(u => u.EmployeeCode == dispute.EmployeeCode, ct);
         if (user != null)
@@ -272,6 +317,8 @@ public class TimesheetPublicationService : ITimesheetPublicationService
             _db.Notifications.Add(new Notification
             {
                 UserId = user.Id,
+                CompanyId = companyId,
+                BranchCode = branchCode,
                 Title = $"Khiếu nại bảng công đã được {actionText}",
                 Body = $"Phản hồi từ HCNS: {response}",
                 LinkType = "DISPUTE",

@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { CalendarDay, AttendanceCode } from '../../types';
 import { api } from '../../api/client';
+import { DateInput } from '../../components/DateInput';
 import {
   Calendar as CalendarIcon,
   RefreshCw,
@@ -76,6 +77,10 @@ export const CalendarManager: React.FC<CalendarManagerProps> = () => {
       .then(res => setCodes(res.data))
       .catch(console.error);
   }, [selectedCompany?.id]);
+
+  const getCodeTotalPaid = (c: AttendanceCode): number => {
+    return Number(c.workValue || 0) + Number(c.holidayValue || 0) + Number(c.annualLeaveValue || 0) + Number(c.paidLeaveValue || 0);
+  };
 
   const fetchCalendar = async () => {
     if (!selectedCompany) return;
@@ -585,7 +590,15 @@ export const CalendarManager: React.FC<CalendarManagerProps> = () => {
                           {isHoliday ? (
                             <span style={{ fontWeight: 700, color: '#e11d48' }}>Mã L (1.0 công)</span>
                           ) : isCompanyOff ? (
-                            <span style={{ fontWeight: 700, color: '#2563eb' }}>Mã {d.companyOffCode || 'CT'}</span>
+                            (() => {
+                              const found = codes.find(c => c.code === d.companyOffCode);
+                              const paid = found ? getCodeTotalPaid(found) : 1.0;
+                              return (
+                                <span style={{ fontWeight: 700, color: '#2563eb' }}>
+                                  Mã {d.companyOffCode || 'CT'} ({paid.toFixed(1)} công)
+                                </span>
+                              );
+                            })()
                           ) : isHalfWork ? (
                             <span style={{ fontWeight: 600, color: '#d97706' }}>
                               {d.halfSession === 'PM' ? 'Chiều (0.5 công)' : 'Sáng (0.5 công)'}
@@ -698,7 +711,15 @@ export const CalendarManager: React.FC<CalendarManagerProps> = () => {
                         {isHoliday ? (
                           <span className="badge badge-danger" style={{ fontWeight: 800 }}>L (Lễ 1.0 công)</span>
                         ) : isCompanyOff ? (
-                          <span className="badge badge-primary" style={{ fontWeight: 800 }}>{d.companyOffCode || 'CT'}</span>
+                          (() => {
+                            const found = codes.find(c => c.code === d.companyOffCode);
+                            const paid = found ? getCodeTotalPaid(found) : 1.0;
+                            return (
+                              <span className="badge badge-primary" style={{ fontWeight: 800 }}>
+                                {d.companyOffCode || 'CT'} ({paid.toFixed(1)} công)
+                              </span>
+                            );
+                          })()
                         ) : (
                           <span style={{ color: '#94a3b8' }}>-</span>
                         )}
@@ -757,13 +778,10 @@ export const CalendarManager: React.FC<CalendarManagerProps> = () => {
               <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                 <div className="form-group">
                   <label className="form-label" style={{ fontWeight: 600 }}>Ngày áp dụng (*)</label>
-                  <input
-                    type="date"
+                  <DateInput
                     required
                     value={editDateStr}
-                    onChange={(e) => setEditDateStr(e.target.value)}
-                    className="form-control"
-                    style={{ fontWeight: 600 }}
+                    onChange={(val) => setEditDateStr(val)}
                   />
                 </div>
 
@@ -850,15 +868,27 @@ export const CalendarManager: React.FC<CalendarManagerProps> = () => {
                       value={editCompanyOffCode}
                       onChange={(e) => setEditCompanyOffCode(e.target.value)}
                     >
-                      <option value="L">L - Nghỉ Lễ (Hưởng 1.0 công)</option>
-                      <option value="CT">CT - Công tác (Hưởng 1.0 công)</option>
-                      <option value="RO">RO - Nghỉ chế độ / Du lịch (Hưởng 1.0 công)</option>
-                      {codes.filter(c => c.code !== 'L' && c.code !== 'CT' && c.code !== 'RO').map(c => (
-                        <option key={c.id} value={c.code}>
-                          {c.code} - {c.name} (Hưởng {c.workValue} công)
-                        </option>
-                      ))}
+                      {codes.length > 0 ? (
+                        codes.map((c) => {
+                          const totalPaid = getCodeTotalPaid(c);
+                          return (
+                            <option key={c.id} value={c.code}>
+                              {c.code} - {c.name} (Hưởng {totalPaid.toFixed(1)} công)
+                            </option>
+                          );
+                        })
+                      ) : (
+                        <>
+                          <option value="L">L - Nghỉ Lễ (Hưởng 1.0 công)</option>
+                          <option value="BL">BL - Bù lễ (Hưởng 1.0 công)</option>
+                          <option value="CT">CT - Công tác (Hưởng 1.0 công)</option>
+                          <option value="RO">RO - Nghỉ chế độ / Du lịch (Hưởng 1.0 công)</option>
+                        </>
+                      )}
                     </select>
+                    <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
+                      💡 Công hưởng quy đổi lấy chính xác theo cấu hình trong Bảng Quy Chuẩn Mã Ký Hiệu Chấm Công của hội sở.
+                    </div>
                   </div>
                 )}
 

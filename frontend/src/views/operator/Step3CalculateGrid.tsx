@@ -311,8 +311,20 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
                     <th style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-200)', minWidth: '50px' }} title="Số ngày làm ca 1, HC (H)">Làm</th>
                     <th style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-200)', minWidth: '50px' }} title="Ngày lễ hưởng lương (I)">Lễ</th>
                     <th style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-200)', minWidth: '50px' }} title="Nghỉ phép năm (K)">Phép</th>
+                    <th
+                      style={{
+                        padding: '6px 6px',
+                        borderRight: '1px solid var(--neutral-200)',
+                        minWidth: '60px',
+                        backgroundColor: '#f0fdf4',
+                        color: '#166534'
+                      }}
+                      title={`Tồn phép năm (Tại T${period.month}) = Tổng phép hưởng - Dùng lũy kế`}
+                    >
+                      Tồn phép
+                    </th>
                     <th style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-200)', minWidth: '50px' }} title="Nghỉ hưởng lương (L)">Hưởng L</th>
-                    <th style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-200)', minWidth: '50px' }} title="Nghỉ trừ lương (M)">Trừ L</th>
+                    <th style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-200)', minWidth: '50px' }} title="Nghỉ không lương (N)">Không L</th>
                     <th style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-300)', minWidth: '60px', backgroundColor: '#e2efda' }} title="Số ngày công tính lương (N)">Tổng công</th>
                     <th style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-300)', minWidth: '65px' }} title="Tổng phút đi trễ về sớm">Trễ/Sớm</th>
 
@@ -349,7 +361,15 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
                       </td>
                       <td style={{ padding: '6px 8px', borderRight: '1px solid var(--neutral-300)', position: 'sticky', left: '110px', backgroundColor: '#ffffff', zIndex: 5, textAlign: 'left', whiteSpace: 'nowrap' }}>
                         <div style={{ fontWeight: 600, color: 'var(--neutral-900)' }}>{row.employee.fullName}</div>
-                        {row.employee.exemptPunch && <span className="badge badge-neutral" style={{ fontSize: '9px', padding: '0 4px' }}>Miễn quẹt</span>}
+                        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap', marginTop: '2px' }}>
+                          {row.employee.exemptPunch && <span className="badge badge-neutral" style={{ fontSize: '9px', padding: '0 4px' }}>Miễn quẹt</span>}
+                          {row.employee.employeeType === 'REMOTE' && (
+                            <span className="badge" style={{ backgroundColor: '#e0f2fe', color: '#0369a1', fontSize: '9px', padding: '0 4px' }}>Remote</span>
+                          )}
+                          {row.employee.employeeType === 'PARTTIME' && (
+                            <span className="badge" style={{ backgroundColor: '#fef3c7', color: '#92400e', fontSize: '9px', padding: '0 4px' }}>Part-time</span>
+                          )}
+                        </div>
                       </td>
                       <td style={{ padding: '6px 8px', borderRight: '1px solid var(--neutral-200)', color: 'var(--neutral-600)', whiteSpace: 'nowrap' }}>
                         {row.employee.departmentName}
@@ -359,6 +379,29 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
                       <td style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-200)', fontWeight: 600 }}>{row.summary.workDays.toFixed(1)}</td>
                       <td style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-200)' }}>{row.summary.holidayDays.toFixed(1)}</td>
                       <td style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-200)' }}>{row.summary.annualLeaveDays.toFixed(1)}</td>
+                      <td
+                        style={{
+                          padding: '6px 6px',
+                          borderRight: '1px solid var(--neutral-200)',
+                          backgroundColor: row.leaveBalance?.isExhausted ? '#fef2f2' : '#f0fdf4',
+                          color: row.leaveBalance?.isExhausted ? '#991b1b' : '#166534',
+                          fontWeight: 700
+                        }}
+                        title={
+                          row.leaveBalance
+                            ? `Quỹ phép năm (Kỳ Tháng ${period.month}/${period.year}):\n` +
+                              `• Phép năm (Đầu kỳ): ${row.leaveBalance.opening.toFixed(1)}\n` +
+                              `• Tích lũy (Đến T${period.month}): +${row.leaveBalance.accrued.toFixed(1)}\n` +
+                              `• Tổng phép hưởng: ${row.leaveBalance.totalEarned.toFixed(1)}\n` +
+                              `• Đã dùng trong T${period.month}: ${row.leaveBalance.monthUsed.toFixed(1)}\n` +
+                              `• Dùng lũy kế (T1-T${period.month}): ${(row.leaveBalance.totalUsed ?? row.leaveBalance.used ?? 0).toFixed(1)}\n` +
+                              `------------------------------------\n` +
+                              `• Tồn phép (Tại T${period.month}): ${row.leaveBalance.available.toFixed(1)} ngày`
+                            : 'Chưa có thông tin số dư phép'
+                        }
+                      >
+                        {row.leaveBalance ? row.leaveBalance.available.toFixed(1) : '-'}
+                      </td>
                       <td style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-200)' }}>{row.summary.paidLeaveDays.toFixed(1)}</td>
                       <td style={{ padding: '6px 6px', borderRight: '1px solid var(--neutral-200)', color: row.summary.unpaidDays > 0 ? 'var(--danger-text)' : undefined, fontWeight: row.summary.unpaidDays > 0 ? 700 : 400 }}>
                         {row.summary.unpaidDays.toFixed(1)}
@@ -372,8 +415,28 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
 
                       {/* Day Cells */}
                       {row.days.map((cell) => {
+                        if (cell.outOfEmployment) {
+                          return (
+                            <td
+                              key={cell.date}
+                              style={{
+                                padding: '5px 2px',
+                                borderRight: '1px solid var(--neutral-200)',
+                                backgroundColor: '#f1f5f9',
+                                color: '#94a3b8',
+                                fontSize: '11px',
+                                textAlign: 'center',
+                                userSelect: 'none'
+                              }}
+                              title={`Chưa vào làm việc hoặc đã nghỉ việc trong ngày ${new Date(cell.date).toLocaleDateString('vi-VN')}`}
+                            >
+                              -
+                            </td>
+                          );
+                        }
+
                         const codeDef = cell.code ? data.codes[cell.code] : null;
-                        const cellBg = codeDef?.color ? `#${codeDef.color.replace('#', '')}` : (cell.code === '?' ? '#fef3c7' : (cell.code === 'V' ? '#fee2e2' : undefined));
+                        const cellBg = codeDef?.color ? `#${codeDef.color.replace('#', '')}` : (cell.code === '?' ? '#fef3c7' : (cell.code === 'V' || cell.code === 'KP' ? '#fee2e2' : undefined));
 
                         return (
                           <td
@@ -387,7 +450,7 @@ export const Step3CalculateGrid: React.FC<Step3CalculateGridProps> = ({ period, 
                               position: 'relative',
                               transition: 'all 0.1s ease',
                               fontWeight: cell.code ? 700 : 400,
-                              color: cell.code === '?' ? '#92400e' : (cell.code === 'V' ? '#991b1b' : 'var(--neutral-900)')
+                              color: cell.code === '?' ? '#92400e' : (cell.code === 'V' || cell.code === 'KP' ? '#991b1b' : 'var(--neutral-900)')
                             }}
                             title={`Nhấp để xem chi tiết / chỉnh sửa ngày ${new Date(cell.date).toLocaleDateString('vi-VN')}`}
                           >

@@ -153,7 +153,7 @@ function markdownToDocx(mdContent, docTitle, baseDir) {
       continue;
     }
 
-    // Tiêu đề H1
+    // Tiêu đề H1 (Đơn sắc trầm, lịch sự)
     if (line.startsWith('# ')) {
       const titleText = line.replace(/^#\s+/, '');
       children.push(
@@ -164,9 +164,9 @@ function markdownToDocx(mdContent, docTitle, baseDir) {
             new TextRun({
               text: titleText,
               font: 'Segoe UI',
-              size: 36, // 18pt
+              size: 34, // 17pt
               bold: true,
-              color: '0A369D' // Superbrain Blue
+              color: '1E293B' // Deep Charcoal
             })
           ]
         })
@@ -175,7 +175,7 @@ function markdownToDocx(mdContent, docTitle, baseDir) {
       continue;
     }
 
-    // Tiêu đề H2
+    // Tiêu đề H2 (Cùng tông trầm với H1, phân cấp bằng kích cỡ)
     if (line.startsWith('## ')) {
       const h2Text = line.replace(/^##\s+/, '');
       children.push(
@@ -188,7 +188,7 @@ function markdownToDocx(mdContent, docTitle, baseDir) {
               font: 'Segoe UI',
               size: 28, // 14pt
               bold: true,
-              color: '1A56DB'
+              color: '1E293B' // Deep Charcoal
             })
           ]
         })
@@ -197,7 +197,7 @@ function markdownToDocx(mdContent, docTitle, baseDir) {
       continue;
     }
 
-    // Tiêu đề H3
+    // Tiêu đề H3 (Slate Gray)
     if (line.startsWith('### ')) {
       const h3Text = line.replace(/^###\s+/, '');
       children.push(
@@ -210,7 +210,7 @@ function markdownToDocx(mdContent, docTitle, baseDir) {
               font: 'Segoe UI',
               size: 24, // 12pt
               bold: true,
-              color: '2B6CB0'
+              color: '334155' // Slate 700
             })
           ]
         })
@@ -219,7 +219,7 @@ function markdownToDocx(mdContent, docTitle, baseDir) {
       continue;
     }
 
-    // Tiêu đề H4
+    // Tiêu đề H4 (Slate Gray)
     if (line.startsWith('#### ')) {
       const h4Text = line.replace(/^####\s+/, '');
       children.push(
@@ -231,7 +231,7 @@ function markdownToDocx(mdContent, docTitle, baseDir) {
               font: 'Segoe UI',
               size: 22,
               bold: true,
-              color: '2D3748'
+              color: '475569' // Slate 600
             })
           ]
         })
@@ -435,7 +435,7 @@ function markdownToDocx(mdContent, docTitle, baseDir) {
             const cleanText = cText.trim();
             return new TableCell({
               shading: isHeader
-                ? { type: ShadingType.CLEAR, fill: '0A369D' }
+                ? { type: ShadingType.CLEAR, fill: '1E293B' }
                 : (rIdx % 2 === 1 ? { type: ShadingType.CLEAR, fill: 'F8FAFC' } : { type: ShadingType.CLEAR, fill: 'FFFFFF' }),
               margins: { top: 100, bottom: 100, left: 120, right: 120 },
               borders: {
@@ -501,7 +501,7 @@ function markdownToDocx(mdContent, docTitle, baseDir) {
               font: 'Segoe UI',
               size: 22,
               bold: true,
-              color: '0A369D'
+              color: '1E293B'
             }),
             ...parseInlineRuns(restText, { size: 22 })
           ]
@@ -613,14 +613,25 @@ function markdownToDocx(mdContent, docTitle, baseDir) {
   });
 }
 
-// Chạy chuyển đổi cho từng file
+// Chạy chuyển đổi cho từng file (có xử lý an toàn khi file đang mở trong Word/WPS)
 async function convertFile(inputMdPath, outputDocxPath, title, baseDir) {
   console.log(`Đang xử lý: ${inputMdPath} -> ${outputDocxPath}`);
   const content = fs.readFileSync(inputMdPath, 'utf8');
   const doc = markdownToDocx(content, title, baseDir);
   const buffer = await Packer.toBuffer(doc);
-  fs.writeFileSync(outputDocxPath, buffer);
-  console.log(`✅ Xuất thành công: ${outputDocxPath} (${Math.round(buffer.length / 1024)} KB)`);
+  try {
+    fs.writeFileSync(outputDocxPath, buffer);
+    console.log(`✅ Xuất thành công: ${outputDocxPath} (${Math.round(buffer.length / 1024)} KB)`);
+  } catch (err) {
+    if (err.code === 'EBUSY') {
+      const parsed = path.parse(outputDocxPath);
+      const fallbackPath = path.join(parsed.dir, `${parsed.name}_cap_nhat${parsed.ext}`);
+      fs.writeFileSync(fallbackPath, buffer);
+      console.log(`⚠️ File ${parsed.base} đang được mở trong ứng dụng khác (WPS/Word). Đã xuất dự phòng vào: ${fallbackPath} (${Math.round(buffer.length / 1024)} KB)`);
+    } else {
+      throw err;
+    }
+  }
 }
 
 async function main() {

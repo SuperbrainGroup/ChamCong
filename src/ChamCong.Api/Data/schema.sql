@@ -548,17 +548,28 @@ CREATE TABLE dbo.tbl_EmployeeDevices (
 );
 GO
 
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot')
-CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_ActiveSlot ON dbo.tbl_EmployeeDevices(EmployeeCode, DeviceType) WHERE IsActiveSlot = 1;
+IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot' AND object_id = OBJECT_ID('dbo.tbl_EmployeeDevices'))
+    DROP INDEX UX_Dev_ActiveSlot ON dbo.tbl_EmployeeDevices;
+GO
+
+-- Cho phép 1 tài khoản đăng ký nhiều địa chỉ MAC / thiết bị trên Mobile (Safari, PWA, App)
+-- Chỉ giới hạn 1 khe PC hoạt động cho mỗi nhân viên
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot_PC' AND object_id = OBJECT_ID('dbo.tbl_EmployeeDevices'))
+CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_ActiveSlot_PC ON dbo.tbl_EmployeeDevices(CompanyId, EmployeeCode) WHERE IsActiveSlot = 1 AND DeviceType = 'PC';
+GO
+
+-- Đảm bảo mỗi địa chỉ MAC / Fingerprint chỉ gán 1 lần cho cùng 1 nhân viên
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_Active_Emp_Fp' AND object_id = OBJECT_ID('dbo.tbl_EmployeeDevices'))
+CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_Active_Emp_Fp ON dbo.tbl_EmployeeDevices(CompanyId, EmployeeCode, FingerprintHash) WHERE FingerprintHash IS NOT NULL AND IsActiveSlot = 1;
 GO
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSecret')
 CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_ActiveSecret ON dbo.tbl_EmployeeDevices(SecretHash) WHERE IsActiveSlot = 1;
 GO
 
--- Ràng buộc: Mỗi địa chỉ MAC của máy tính chỉ được gán cho 1 nhân viên duy nhất (Chống chấm công hộ)
+-- Ràng buộc: Mỗi địa chỉ MAC của máy tính chỉ được gán cho 1 nhân viên duy nhất trong cùng hội sở (Chống chấm công hộ)
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UQ_EmployeeDevices_ActiveMac')
-CREATE UNIQUE NONCLUSTERED INDEX UQ_EmployeeDevices_ActiveMac ON dbo.tbl_EmployeeDevices(FingerprintHash) WHERE FingerprintHash IS NOT NULL AND IsActiveSlot = 1 AND DeviceType = 'PC';
+CREATE UNIQUE NONCLUSTERED INDEX UQ_EmployeeDevices_ActiveMac ON dbo.tbl_EmployeeDevices(CompanyId, FingerprintHash) WHERE FingerprintHash IS NOT NULL AND IsActiveSlot = 1 AND DeviceType = 'PC';
 GO
 
 IF OBJECT_ID(N'dbo.tbl_RefreshTokens', N'U') IS NULL
@@ -816,18 +827,25 @@ IF OBJECT_ID(N'dbo.tbl_Notifications', N'U') IS NULL
 CREATE TABLE dbo.tbl_Notifications (
     NotificationID BIGINT IDENTITY(1,1) PRIMARY KEY,
     UserID         INT           NOT NULL,
+    CompanyId      INT           NULL,
+    BranchCode     NVARCHAR(50)  NULL,
     Title          NVARCHAR(120) NOT NULL,
     Body           NVARCHAR(300) NULL,
     LinkType       VARCHAR(20)   NULL,
     LinkID         INT           NULL,
     IsRead         BIT           NOT NULL CONSTRAINT DF_Noti_Read DEFAULT (0),
     CreatedAtUtc   DATETIME2(0)  NOT NULL CONSTRAINT DF_Noti_Created DEFAULT (SYSUTCDATETIME()),
-    CONSTRAINT FK_Noti_User FOREIGN KEY (UserID) REFERENCES dbo.Users(Id) ON DELETE CASCADE
+    CONSTRAINT FK_Noti_User FOREIGN KEY (UserID) REFERENCES dbo.Users(Id) ON DELETE CASCADE,
+    CONSTRAINT FK_Noti_Company FOREIGN KEY (CompanyId) REFERENCES dbo.Companies(Id)
 );
 GO
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Noti_User')
 CREATE NONCLUSTERED INDEX IX_Noti_User ON dbo.tbl_Notifications(UserID, IsRead, CreatedAtUtc);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Noti_User_Company')
+CREATE NONCLUSTERED INDEX IX_Noti_User_Company ON dbo.tbl_Notifications(UserID, CompanyId, IsRead, CreatedAtUtc);
 GO
 
 IF OBJECT_ID(N'dbo.tbl_HrAlerts', N'U') IS NULL
@@ -918,12 +936,16 @@ BEGIN
 END
 GO
 
-IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot')
+IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot' AND object_id = OBJECT_ID('dbo.tbl_EmployeeDevices'))
     DROP INDEX UX_Dev_ActiveSlot ON dbo.tbl_EmployeeDevices;
 GO
 
-IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot')
-    CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_ActiveSlot ON dbo.tbl_EmployeeDevices(CompanyId, EmployeeCode, DeviceType) WHERE IsActiveSlot = 1;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_ActiveSlot_PC' AND object_id = OBJECT_ID('dbo.tbl_EmployeeDevices'))
+    CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_ActiveSlot_PC ON dbo.tbl_EmployeeDevices(CompanyId, EmployeeCode) WHERE IsActiveSlot = 1 AND DeviceType = 'PC';
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'UX_Dev_Active_Emp_Fp' AND object_id = OBJECT_ID('dbo.tbl_EmployeeDevices'))
+    CREATE UNIQUE NONCLUSTERED INDEX UX_Dev_Active_Emp_Fp ON dbo.tbl_EmployeeDevices(CompanyId, EmployeeCode, FingerprintHash) WHERE FingerprintHash IS NOT NULL AND IsActiveSlot = 1;
 GO
 
 -- Bổ sung CompanyId vào tbl_DailyPunchSummary & Khóa chính
@@ -1019,5 +1041,63 @@ GO
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Log_Comp_Emp_Date')
     CREATE NONCLUSTERED INDEX IX_Log_Comp_Emp_Date ON dbo.tbl_WebAttendanceLogs(CompanyId, EmployeeCode, WorkDate, CheckTimeUtc);
 GO
+
+-- 11. ĐỒNG BỘ NÂNG CẤP BẢNG MÃ QUY CHUẨN: V -> KP, XÓA NL, 1/2P -> P/2
+IF EXISTS (SELECT 1 FROM dbo.AttendanceCodes WHERE Code = 'V')
+BEGIN
+    UPDATE dbo.AttendanceCodes SET Code = 'KP', Name = N'Không Phép (KP)' WHERE Code = 'V';
+END
+GO
+
+IF EXISTS (SELECT 1 FROM dbo.AttendanceCodes WHERE Code = 'NL')
+BEGIN
+    DELETE FROM dbo.AttendanceCodes WHERE Code = 'NL';
+END
+GO
+
+IF EXISTS (SELECT 1 FROM dbo.AttendanceCodes WHERE Code = '1/2P')
+BEGIN
+    UPDATE dbo.AttendanceCodes SET Code = 'P/2', Name = N'Nghỉ phép năm 1/2 ngày' WHERE Code = '1/2P';
+END
+GO
+
+-- 12. CỘT PHÂN LOẠI NHÂN SỰ: STANDARD | REMOTE | PARTTIME
+IF OBJECT_ID(N'dbo.Employees', N'U') IS NOT NULL
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = N'Employees' AND COLUMN_NAME = N'EmployeeType')
+        ALTER TABLE dbo.Employees ADD EmployeeType NVARCHAR(20) NOT NULL CONSTRAINT DF_Employees_EmployeeType DEFAULT (N'STANDARD');
+END
+GO
+
+-- 13. BẢNG ĐĂNG KÝ LỊCH LÀM VIỆC (DÀNH CHO REMOTE & PART-TIME)
+IF OBJECT_ID(N'dbo.tbl_WorkSchedules', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.tbl_WorkSchedules (
+        ScheduleId INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_tbl_WorkSchedules PRIMARY KEY,
+        CompanyId INT NOT NULL,
+        EmployeeId INT NULL,
+        EmployeeCode NVARCHAR(30) NOT NULL,
+        WorkDate DATE NOT NULL,
+        ShiftCode NVARCHAR(20) NOT NULL CONSTRAINT DF_tbl_WorkSchedules_Shift DEFAULT (N'FULL'),
+        Note NVARCHAR(250) NULL,
+        Status NVARCHAR(20) NOT NULL CONSTRAINT DF_tbl_WorkSchedules_Status DEFAULT (N'REGISTERED'),
+        RegisteredAtUtc DATETIME NOT NULL CONSTRAINT DF_tbl_WorkSchedules_RegAt DEFAULT (GETDATE()),
+        RegisteredBy NVARCHAR(50) NULL,
+        CONSTRAINT UQ_tbl_WorkSchedules_EmpDate UNIQUE (CompanyId, EmployeeCode, WorkDate)
+    );
+    CREATE NONCLUSTERED INDEX IX_tbl_WorkSchedules_CompDate ON dbo.tbl_WorkSchedules (CompanyId, WorkDate, EmployeeCode);
+END
+GO
+
+-- 14. BỔ SUNG MÃ NGHỈ KHÔNG LƯƠNG KL CHO TẤT CẢ CÁC HỘI SỞ
+IF OBJECT_ID(N'dbo.AttendanceCodes', N'U') IS NOT NULL
+BEGIN
+    INSERT INTO dbo.AttendanceCodes (CompanyId, Code, Name, WorkValue, HolidayValue, AnnualLeaveValue, PaidLeaveValue, FundType, FundDeduct, IsHalfLeave, Color, SortOrder, IsSystem, Condition)
+    SELECT c.Id, N'KL', N'Nghỉ không hưởng lương', 0, 0, 0, 0, 0, 0, 0, N'E2EFDA', 13, 1, N'Đã hết phép năm hoặc nghỉ việc riêng không hưởng lương; có đơn xin phép được duyệt'
+    FROM dbo.Companies c
+    WHERE NOT EXISTS (SELECT 1 FROM dbo.AttendanceCodes a WHERE a.CompanyId = c.Id AND a.Code = N'KL');
+END
+GO
+
 
 

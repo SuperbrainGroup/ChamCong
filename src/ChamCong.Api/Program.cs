@@ -79,6 +79,7 @@ builder.Services.AddScoped<IGeofenceService, GeofenceService>();
 builder.Services.AddScoped<IAttendancePunchService, AttendancePunchService>();
 builder.Services.AddScoped<IEmployeeRequestService, EmployeeRequestService>();
 builder.Services.AddScoped<ITimesheetPublicationService, TimesheetPublicationService>();
+builder.Services.AddScoped<ILeaveService, LeaveService>();
 
 // Cấu hình giới hạn dung lượng upload file (50MB)
 builder.Services.Configure<Microsoft.AspNetCore.Http.Features.FormOptions>(options =>

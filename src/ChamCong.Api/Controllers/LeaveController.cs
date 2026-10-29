@@ -1,6 +1,7 @@
 using ClosedXML.Excel;
 using ChamCong.Api.Data;
 using ChamCong.Api.Infrastructure;
+using ChamCong.Api.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -15,12 +16,14 @@ public class LeaveController : ControllerBase
     private readonly AppDbContext _db;
     private readonly AccessService _access;
     private readonly AuditService _audit;
+    private readonly ILeaveService _leaveService;
 
-    public LeaveController(AppDbContext db, AccessService access, AuditService audit)
+    public LeaveController(AppDbContext db, AccessService access, AuditService audit, ILeaveService leaveService)
     {
         _db = db;
         _access = access;
         _audit = audit;
+        _leaveService = leaveService;
     }
 
     // ===============================================
@@ -89,10 +92,17 @@ public class LeaveController : ControllerBase
         var emp = await _access.GetEmployeeAsync(dto.EmployeeId, ct);
         var date = dto.Date.Date;
         var code = Text.Required(dto.Code, "Mã nghỉ phép", 10).ToUpperInvariant();
+        if (code == "1/2P") code = "P/2";
 
         if (!await _db.AttendanceCodes.AnyAsync(c => c.CompanyId == companyId && c.Code == code, ct))
         {
             return BadRequest(new { message = $"Mã nghỉ phép '{code}' không có trong Bảng quy chuẩn của hội sở." });
+        }
+
+        if (code.StartsWith("P", StringComparison.OrdinalIgnoreCase))
+        {
+            decimal days = code == "P/2" ? 0.5m : 1.0m;
+            await _leaveService.ValidateLeaveRequestAllowedAsync(emp.Id, code, days, date, companyId, ct);
         }
 
         var existing = await _db.LeaveRequests.FirstOrDefaultAsync(l => l.EmployeeId == dto.EmployeeId && l.Date == date, ct);
@@ -130,6 +140,17 @@ public class LeaveController : ControllerBase
         await _access.EnsureCompanyAsync(companyId, ct);
         var req = await _db.LeaveRequests.FirstOrDefaultAsync(l => l.Id == id && l.CompanyId == companyId, ct);
         if (req == null) return NotFound();
+
+        if (req.Code.StartsWith("P", StringComparison.OrdinalIgnoreCase))
+        {
+            var ledger = await _db.LeaveLedger
+                .Where(l => l.EmployeeId == req.EmployeeId && l.Date == req.Date && l.Year == (short)req.Date.Year && l.Amount < 0 && l.Fund == "ANNUAL")
+                .FirstOrDefaultAsync(ct);
+            if (ledger != null)
+            {
+                _db.LeaveLedger.Remove(ledger);
+            }
+        }
 
         _db.LeaveRequests.Remove(req);
         _audit.Log("LeaveRequest", req.Id, "DeleteRequest", $"Xóa đơn nghỉ ngày {req.Date:dd/MM/yyyy}", companyId: companyId);
@@ -188,6 +209,21 @@ public class LeaveController : ControllerBase
                 continue;
             }
 
+            // Kiểm tra số dư phép nếu là nghỉ phép năm
+            if (code.StartsWith("P", StringComparison.OrdinalIgnoreCase))
+            {
+                decimal days = code == "P/2" ? 0.5m : 1.0m;
+                try
+                {
+                    await _leaveService.ValidateLeaveRequestAllowedAsync(emp.Id, code, days, dt, companyId, ct);
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"Dòng {r}: {ex.Message}");
+                    continue;
+                }
+            }
+
             var existing = await _db.LeaveRequests.FirstOrDefaultAsync(l => l.EmployeeId == emp.Id && l.Date == dt, ct);
             if (existing != null)
             {
@@ -229,10 +265,20 @@ public class LeaveController : ControllerBase
         decimal AnnualOpening,
         decimal CarryOpening,
         decimal CompOpening,
-        decimal AnnualUsed,
+        decimal Accrued,           // Tích lũy trong năm / đến thời điểm tháng đó (+1 ngày mỗi kỳ làm việc >= 50% ngày công chuẩn)
+        decimal TotalEarned,       // Tổng phép năm được hưởng đến thời điểm đó (Đầu kỳ + Phép chuyển + Tích lũy)
+        decimal TotalAnnualEarned, // Alias đồng bộ frontend
+        decimal AnnualUsed,        // Đã sử dụng phép năm lũy kế đến thời điểm đó
         decimal CarryUsed,
         decimal CompUsed,
-        decimal TotalRemaining);
+        decimal TotalUsed,         // Tổng số ngày đã sử dụng lũy kế đến thời điểm đó
+        decimal TotalRemaining,    // Số phép năm tồn còn lại tại thời điểm đó
+        decimal AvailableBalance,  // Alias đồng bộ frontend
+        bool IsExhausted,
+        int? Month = null,         // Tháng đang lọc (null nếu cả năm)
+        decimal MonthUsed = 0m,    // Số ngày phép đã sử dụng trong riêng tháng đó
+        decimal MonthAnnualUsed = 0m // Số ngày phép năm đã sử dụng trong riêng tháng đó
+    );
 
     public record SaveLeaveFundDto(
         int EmployeeId,
@@ -242,65 +288,45 @@ public class LeaveController : ControllerBase
         decimal CompOpening);
 
     [HttpGet("funds")]
-    public async Task<IActionResult> GetFunds(int companyId, [FromQuery] short year, CancellationToken ct)
+    public async Task<IActionResult> GetFunds(int companyId, [FromQuery] short year, [FromQuery] int? month = null, CancellationToken ct = default)
     {
         _access.EnsureStaffOrAbove();
         await _access.EnsureCompanyAsync(companyId, ct);
 
-        var employees = await _db.Employees
-            .AsNoTracking()
-            .Where(e => e.CompanyId == companyId)
-            .OrderBy(e => e.SortOrder)
-            .ThenBy(e => e.EmployeeCode)
-            .ToListAsync(ct);
-
-        var empIds = employees.Select(e => e.Id).ToList();
-
-        var funds = await _db.LeaveFunds
-            .AsNoTracking()
-            .Where(f => f.Year == year && empIds.Contains(f.EmployeeId))
-            .ToDictionaryAsync(f => f.EmployeeId, ct);
-
-        // Lấy tổng khấu trừ trong năm từ sổ cái
-        var ledgerSums = await _db.LeaveLedger
-            .AsNoTracking()
-            .Where(l => l.Year == year && empIds.Contains(l.EmployeeId))
-            .GroupBy(l => new { l.EmployeeId, l.Fund })
-            .Select(g => new { g.Key.EmployeeId, g.Key.Fund, Used = -g.Sum(x => x.Amount) })
-            .ToListAsync(ct);
-
-        var usedMap = ledgerSums.GroupBy(x => x.EmployeeId)
-            .ToDictionary(g => g.Key, g => g.ToDictionary(x => x.Fund, x => x.Used));
-
-        var dtos = employees.Select(e =>
+        // Quy tắc: Chỉ có thể xem số dư phép tối đa đến tháng hiện tại
+        var now = DateTime.Today;
+        if (year > now.Year)
         {
-            funds.TryGetValue(e.Id, out var fund);
-            usedMap.TryGetValue(e.Id, out var used);
+            return BadRequest(new { message = $"Chỉ có thể xem số dư phép tối đa đến năm hiện tại ({now.Year})." });
+        }
+        if (year == now.Year && month.HasValue && month.Value > now.Month)
+        {
+            month = now.Month;
+        }
 
-            decimal annOpen = fund?.AnnualOpening ?? 0;
-            decimal carOpen = fund?.CarryOpening ?? 0;
-            decimal compOpen = fund?.CompOpening ?? 0;
-
-            decimal annUsed = used != null && used.TryGetValue("ANNUAL", out var au) ? au : 0;
-            decimal carUsed = used != null && used.TryGetValue("CARRY", out var cu) ? cu : 0;
-            decimal compUsed = used != null && used.TryGetValue("COMP", out var cpu) ? cpu : 0;
-
-            decimal rem = (annOpen - annUsed) + (carOpen - carUsed) + (compOpen - compUsed);
-
-            return new LeaveFundDto(
-                e.Id,
-                e.EmployeeCode,
-                e.FullName,
-                year,
-                annOpen,
-                carOpen,
-                compOpen,
-                annUsed,
-                carUsed,
-                compUsed,
-                rem
-            );
-        }).ToList();
+        var list = await _leaveService.GetCompanyLeaveFundsAsync(companyId, year, month, ct);
+        var dtos = list.Select(f => new LeaveFundDto(
+            f.EmployeeId,
+            f.EmployeeCode,
+            f.FullName,
+            (short)f.Year,
+            f.AnnualOpening,
+            f.CarryOpening,
+            f.CompOpening,
+            f.Accrued,
+            f.TotalAnnualEarned,
+            f.TotalAnnualEarned,
+            f.AnnualUsed,
+            f.CarryUsed,
+            f.CompUsed,
+            f.TotalUsed,
+            f.AvailableBalance,
+            f.AvailableBalance,
+            f.IsExhausted,
+            f.Month,
+            f.MonthUsed,
+            f.MonthAnnualUsed
+        )).ToList();
 
         return Ok(dtos);
     }
@@ -361,13 +387,7 @@ public class LeaveController : ControllerBase
             _access.EnsureStaffOrAbove();
         }
 
-        var list = await _db.LeaveLedger
-            .AsNoTracking()
-            .Where(l => l.EmployeeId == employeeId && l.Year == year)
-            .OrderBy(l => l.Date)
-            .ThenBy(l => l.Id)
-            .ToListAsync(ct);
-
+        var list = await _leaveService.GetEmployeeLedgerAsync(employeeId, year, ct);
         return Ok(list);
     }
 }

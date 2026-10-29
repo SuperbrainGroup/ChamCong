@@ -46,7 +46,9 @@ export const Step2Warnings: React.FC<Step2WarningsProps> = ({ period, onNextStep
 
   const handleOpenModal = (item: WarningItem) => {
     setSelectedItem(item);
-    setOverrideCode(item.code || '1');
+    const isValidCode = codes.some((c) => c.code === item.code);
+    const defaultCode = isValidCode ? (item.code || '1') : (codes.length > 0 ? codes[0].code : '1');
+    setOverrideCode(defaultCode);
     setOverrideReason(item.manualReason || '');
     setModalError(null);
   };
@@ -63,12 +65,14 @@ export const Step2Warnings: React.FC<Step2WarningsProps> = ({ period, onNextStep
     setModalError(null);
 
     try {
+      const dateStr = selectedItem.date.includes('T') ? selectedItem.date.split('T')[0] : selectedItem.date;
       await api.post(`/periods/${period.id}/override`, {
         employeeId: selectedItem.employeeId,
-        date: selectedItem.date,
+        date: dateStr,
         code: overrideCode,
         reason: overrideReason.trim(),
       });
+      toast.success('Đã lưu giải trình ngày công thành công!');
       setSelectedItem(null);
       await fetchData();
     } catch (err: any) {
@@ -98,7 +102,7 @@ export const Step2Warnings: React.FC<Step2WarningsProps> = ({ period, onNextStep
   };
 
   const filteredItems = items.filter((item) => {
-    const isUnresolved = (item.code === '?' || item.code === 'V') && !item.isManual;
+    const isUnresolved = (item.code === '?' || item.code === 'V' || item.code === 'KP') && !item.isManual;
     if (filterType === 'unresolved' && !isUnresolved) return false;
     if (filterType === 'resolved' && isUnresolved) return false;
 
@@ -111,7 +115,7 @@ export const Step2Warnings: React.FC<Step2WarningsProps> = ({ period, onNextStep
     return true;
   });
 
-  const unresolvedCount = items.filter((i) => (i.code === '?' || i.code === 'V') && !i.isManual).length;
+  const unresolvedCount = items.filter((i) => (i.code === '?' || i.code === 'V' || i.code === 'KP') && !i.isManual).length;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -151,11 +155,11 @@ export const Step2Warnings: React.FC<Step2WarningsProps> = ({ period, onNextStep
             <div>
               <div style={{ fontWeight: 700, fontSize: '15px', color: unresolvedCount > 0 ? 'var(--warning-text)' : 'var(--success-text)' }}>
                 {unresolvedCount > 0
-                  ? `Còn ${unresolvedCount} trường hợp nghi vấn thiếu quẹt (?) hoặc vắng (V) chưa được chọn mã giải trình`
+                  ? `Còn ${unresolvedCount} trường hợp nghi vấn thiếu quẹt (?) hoặc Không Phép (KP) chưa được chọn mã giải trình`
                   : 'Toàn bộ trường hợp nghi vấn đã được xử lý và giải trình đầy đủ!'}
               </div>
               <div style={{ fontSize: '12px', color: 'var(--neutral-600)', marginTop: '2px' }}>
-                * Quy định bảo đảm chất lượng: Kỳ công không thể chốt nếu còn tồn tại mã ? hoặc V chưa được chọn mã chính thức kèm lý do.
+                * Quy định bảo đảm chất lượng: Kỳ công không thể chốt nếu còn tồn tại mã ? hoặc KP chưa được chọn mã chính thức kèm lý do.
               </div>
             </div>
 
@@ -228,7 +232,7 @@ export const Step2Warnings: React.FC<Step2WarningsProps> = ({ period, onNextStep
                 </thead>
                 <tbody>
                   {filteredItems.map((item, idx) => {
-                    const isUnres = (item.code === '?' || item.code === 'V') && !item.isManual;
+                    const isUnres = (item.code === '?' || item.code === 'V' || item.code === 'KP') && !item.isManual;
                     return (
                       <tr key={item.id} style={{ backgroundColor: isUnres ? '#fffbeb' : undefined }}>
                         <td style={{ textAlign: 'center' }}>{idx + 1}</td>
@@ -254,8 +258,8 @@ export const Step2Warnings: React.FC<Step2WarningsProps> = ({ period, onNextStep
                           <span
                             className="badge"
                             style={{
-                              backgroundColor: item.code === '?' ? '#fef3c7' : (item.code === 'V' ? '#fee2e2' : 'var(--neutral-100)'),
-                              color: item.code === '?' ? '#92400e' : (item.code === 'V' ? '#991b1b' : 'var(--neutral-800)'),
+                              backgroundColor: item.code === '?' ? '#fef3c7' : (item.code === 'V' || item.code === 'KP' ? '#fee2e2' : 'var(--neutral-100)'),
+                              color: item.code === '?' ? '#92400e' : (item.code === 'V' || item.code === 'KP' ? '#991b1b' : 'var(--neutral-800)'),
                               fontWeight: 800,
                               fontSize: '13px'
                             }}

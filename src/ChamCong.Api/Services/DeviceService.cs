@@ -90,23 +90,90 @@ public class DeviceService : IDeviceService
         }
         var effectiveCompanyId = companyId ?? emp.CompanyId;
 
-        // 2. Ràng buộc: Mỗi nhân viên chỉ có tối đa 1 khe hoạt động (PENDING hoặc APPROVED) cho mỗi loại thiết bị trong hội sở
-        var existingActive = await _db.EmployeeDevices
-            .FirstOrDefaultAsync(d => d.EmployeeCode == employeeCode && (d.CompanyId == null || d.CompanyId == effectiveCompanyId) && d.DeviceType == deviceType && d.IsActiveSlot, ct);
-
-        if (existingActive != null)
+        // 2. Chuẩn hóa địa chỉ MAC / Fingerprint nếu có
+        string? cleanFp = null;
+        if (!string.IsNullOrWhiteSpace(fingerprintHash))
         {
-            if (existingActive.ApprovalStatus == "APPROVED")
+            cleanFp = fingerprintHash.Trim().ToUpperInvariant();
+        }
+
+        // 3. Ràng buộc chống chấm công hộ:
+        // Một địa chỉ MAC / Fingerprint chỉ được đăng ký cho 1 nhân viên duy nhất trong cùng hội sở.
+        // Khác hội sở thì được phép dùng chung thiết bị/MAC.
+        if (!string.IsNullOrWhiteSpace(cleanFp))
+        {
+            var occupiedByOther = await _db.EmployeeDevices.AsNoTracking().FirstOrDefaultAsync(d =>
+                d.FingerprintHash == cleanFp &&
+                d.EmployeeCode != employeeCode &&
+                (d.CompanyId == null || d.CompanyId == effectiveCompanyId) &&
+                d.IsActiveSlot, ct);
+
+            if (occupiedByOther != null)
             {
-                throw AppException.Conflict($"Tài khoản đã có thiết bị {deviceType} đã được duyệt. Hãy liên hệ HCNS để reset thiết bị cũ trước khi đăng ký máy mới.");
-            }
-            if (existingActive.ApprovalStatus == "PENDING")
-            {
-                throw AppException.Conflict($"Bạn đã gửi yêu cầu đăng ký thiết bị {deviceType} và đang chờ HCNS phê duyệt.");
+                var label = deviceType == "PC" ? "Địa chỉ MAC máy tính" : "Địa chỉ MAC / Thiết bị di động";
+                throw AppException.Conflict($"{label} ({cleanFp}) đã được đăng ký cho một nhân viên khác ({occupiedByOther.EmployeeCode}) trong cùng hội sở. Mỗi thiết bị chỉ được sử dụng cho 1 tài khoản trong cùng hội sở để đảm bảo tính minh bạch và tránh chấm công hộ!");
             }
         }
 
-        // 3. Cấp mã bí mật ngẫu nhiên 256-bit (Hex 64 ký tự)
+        // 4. Nếu thiết bị này đã từng được chính nhân viên này đăng ký trước đó (trùng FingerprintHash / MAC):
+        // Cấp lại secret token mới để thiết bị tiếp tục chấm công (Safari/PWA sau khi xóa cache hoặc cài lại)
+        if (!string.IsNullOrWhiteSpace(cleanFp))
+        {
+            var existingSameFp = await _db.EmployeeDevices
+                .FirstOrDefaultAsync(d => d.EmployeeCode == employeeCode &&
+                    (d.CompanyId == null || d.CompanyId == effectiveCompanyId) &&
+                    d.FingerprintHash == cleanFp &&
+                    d.IsActiveSlot, ct);
+
+            if (existingSameFp != null)
+            {
+                var reissuedRawSecret = CryptoUtil.GenerateRandomSecret(32);
+                existingSameFp.SecretHash = CryptoUtil.Sha256Hex(reissuedRawSecret);
+                existingSameFp.ApprovalStatus = "APPROVED";
+                if (!string.IsNullOrWhiteSpace(deviceName)) existingSameFp.DeviceName = deviceName.Length > 100 ? deviceName.Substring(0, 100) : deviceName;
+                if (!string.IsNullOrWhiteSpace(os)) existingSameFp.OperatingSystem = os.Length > 50 ? os.Substring(0, 50) : os;
+                if (!string.IsNullOrWhiteSpace(browser)) existingSameFp.BrowserInfo = browser.Length > 100 ? browser.Substring(0, 100) : browser;
+                if (!string.IsNullOrWhiteSpace(clientIp)) existingSameFp.LastUsedPublicIP = clientIp.Length > 45 ? clientIp.Substring(0, 45) : clientIp;
+                existingSameFp.LastUsedAtUtc = DateTime.UtcNow;
+
+                await _db.SaveChangesAsync(ct);
+                return (existingSameFp, reissuedRawSecret);
+            }
+        }
+
+        // 5. Kiểm tra ràng buộc theo loại thiết bị:
+        // - Đối với PC: Giữ quy định 1 khe PC duy nhất cho mỗi nhân viên
+        if (deviceType == "PC")
+        {
+            var existingPc = await _db.EmployeeDevices
+                .FirstOrDefaultAsync(d => d.EmployeeCode == employeeCode && (d.CompanyId == null || d.CompanyId == effectiveCompanyId) && d.DeviceType == "PC" && d.IsActiveSlot, ct);
+
+            if (existingPc != null)
+            {
+                if (existingPc.ApprovalStatus == "APPROVED")
+                {
+                    throw AppException.Conflict($"Tài khoản đã có thiết bị PC đã được duyệt (MAC: {existingPc.FingerprintHash}). Hãy liên hệ HCNS để reset thiết bị cũ trước khi đăng ký máy mới.");
+                }
+                if (existingPc.ApprovalStatus == "PENDING")
+                {
+                    throw AppException.Conflict("Bạn đã gửi yêu cầu đăng ký thiết bị PC và đang chờ HCNS phê duyệt.");
+                }
+            }
+        }
+        // - Đối với MOBILE: Cho phép 1 tài khoản đăng ký nhiều địa chỉ MAC trên mobile (Safari, PWA, máy phụ...).
+        // Giới hạn tối đa 10 thiết bị active để phòng ngừa lạm dụng.
+        else if (deviceType == "MOBILE")
+        {
+            var activeMobileCount = await _db.EmployeeDevices
+                .CountAsync(d => d.EmployeeCode == employeeCode && (d.CompanyId == null || d.CompanyId == effectiveCompanyId) && d.DeviceType == "MOBILE" && d.IsActiveSlot, ct);
+
+            if (activeMobileCount >= 10)
+            {
+                throw AppException.Conflict("Tài khoản đã đăng ký tối đa 10 thiết bị di động. Vui lòng liên hệ HCNS để thu hồi thiết bị cũ không còn sử dụng.");
+            }
+        }
+
+        // 6. Cấp mã bí mật ngẫu nhiên 256-bit (Hex 64 ký tự) cho thiết bị mới
         var rawSecret = CryptoUtil.GenerateRandomSecret(32);
         var secretHash = CryptoUtil.Sha256Hex(rawSecret);
 
@@ -114,27 +181,10 @@ public class DeviceService : IDeviceService
         var isDuplicateSecret = await _db.EmployeeDevices.AnyAsync(d => d.SecretHash == secretHash && d.IsActiveSlot, ct);
         if (isDuplicateSecret)
         {
-            throw AppException.Conflict("Mã nhận diện thiết bị đã tồn tại trên hệ thống.");
+            throw AppException.Conflict("Mã nhận diện thiết bị đã tồn tại trên hệ thống. Vui lòng thử lại.");
         }
 
-        // Kiểm tra xem thiết bị này (MAC máy tính hoặc Fingerprint di động) đã được đăng ký cho nhân viên khác chưa (1 Thiết bị = 1 Tài khoản duy nhất)
-        string? cleanFp = null;
-        if (!string.IsNullOrWhiteSpace(fingerprintHash))
-        {
-            cleanFp = fingerprintHash.Trim().ToUpperInvariant();
-            var occupiedByOther = await _db.EmployeeDevices.AsNoTracking().FirstOrDefaultAsync(d =>
-                d.FingerprintHash == cleanFp &&
-                (d.EmployeeCode != employeeCode || (d.CompanyId != null && d.CompanyId != effectiveCompanyId)) &&
-                d.IsActiveSlot, ct);
-
-            if (occupiedByOther != null)
-            {
-                var label = deviceType == "PC" ? "Địa chỉ MAC máy tính" : "Thiết bị di động";
-                throw AppException.Conflict($"{label} ({cleanFp}) đã được đăng ký cho một nhân viên khác ({occupiedByOther.EmployeeCode}). Mỗi thiết bị chỉ được sử dụng cho 1 tài khoản người dùng duy nhất để đảm bảo tính minh bạch và tránh chấm công hộ!");
-            }
-        }
-
-        // Tự động gán tên thiết bị theo tên nhân viên nếu để trống (PC - [Tên nhân viên])
+        // Tự động gán tên thiết bị theo tên nhân viên nếu để trống (PC - [Tên nhân viên] hoặc Mobile - [Tên nhân viên])
         if (string.IsNullOrWhiteSpace(deviceName))
         {
             deviceName = deviceType == "PC" ? $"PC - {emp.FullName}" : $"Mobile - {emp.FullName}";
@@ -293,7 +343,7 @@ public class DeviceService : IDeviceService
         var isDuplicateMac = await _db.EmployeeDevices.AnyAsync(d =>
             d.FingerprintHash == cleanMac &&
             d.EmployeeCode != employeeCode &&
-            (companyId == null || d.CompanyId == null || d.CompanyId == companyId) &&
+            (companyId == null ? d.CompanyId == null : d.CompanyId == companyId) &&
             d.IsActiveSlot, ct);
 
         if (isDuplicateMac)
@@ -320,7 +370,7 @@ public class DeviceService : IDeviceService
         var isDuplicateMac = await _db.EmployeeDevices.AnyAsync(d =>
             d.FingerprintHash == cleanMac &&
             d.EmployeeCode != employeeCode &&
-            (companyId == null || d.CompanyId == null || d.CompanyId == companyId) &&
+            (companyId == null ? d.CompanyId == null : d.CompanyId == companyId) &&
             d.IsActiveSlot, ct);
 
         if (isDuplicateMac)

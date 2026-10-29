@@ -18,6 +18,7 @@ public class AuthController : ControllerBase
     private readonly ITokenService _tokenService;
     private readonly IDeviceService _deviceService;
     private readonly IGeofenceService _geofenceService;
+    private readonly AccessService _access;
     private readonly AuditService _audit;
 
     public AuthController(
@@ -26,6 +27,7 @@ public class AuthController : ControllerBase
         ITokenService tokenService,
         IDeviceService deviceService,
         IGeofenceService geofenceService,
+        AccessService access,
         AuditService audit)
     {
         _db = db;
@@ -33,6 +35,7 @@ public class AuthController : ControllerBase
         _tokenService = tokenService;
         _deviceService = deviceService;
         _geofenceService = geofenceService;
+        _access = access;
         _audit = audit;
     }
 
@@ -102,6 +105,11 @@ public class AuthController : ControllerBase
             ? dto.MacAddress 
             : Request.Headers["X-Device-Mac"].FirstOrDefault();
 
+        if (string.IsNullOrWhiteSpace(user.EmployeeCode))
+        {
+            await _access.EnsureEmployeeProfileAsync(user, primaryCompanyId, ct);
+        }
+
         // Kiểm tra thiết bị gửi kèm nếu có header X-Device-Secret (Mobile)
         var rawDeviceSecret = Request.Headers["X-Device-Secret"].FirstOrDefault();
         bool isDeviceApproved = false;
@@ -128,6 +136,12 @@ public class AuthController : ControllerBase
             }
 
             myPcDevice = await pcQuery.FirstOrDefaultAsync(ct);
+        }
+
+        Employee? myEmp = null;
+        if (!string.IsNullOrEmpty(user.EmployeeCode))
+        {
+            myEmp = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.EmployeeCode == user.EmployeeCode, ct);
         }
 
         // Sinh Access Token (8 tiếng nếu thường, 7 ngày nếu RememberMe)
@@ -165,6 +179,7 @@ public class AuthController : ControllerBase
             {
                 user.Id,
                 user.EmployeeCode,
+                employeeType = myEmp?.EmployeeType ?? "STANDARD",
                 user.Username,
                 user.FullName,
                 user.Role,
@@ -317,10 +332,18 @@ public class AuthController : ControllerBase
         var roles = await _db.UserRoles.Where(r => r.UserId == uid).Select(r => r.RoleCode).ToListAsync(ct);
         if (!roles.Any()) roles.Add(user.Role);
 
+        string? employeeType = null;
+        if (!string.IsNullOrWhiteSpace(user.EmployeeCode))
+        {
+            var emp = await _db.Employees.AsNoTracking().FirstOrDefaultAsync(e => e.EmployeeCode == user.EmployeeCode, ct);
+            employeeType = emp?.EmployeeType;
+        }
+
         return Ok(new
         {
             user.Id,
             user.EmployeeCode,
+            employeeType = employeeType ?? "STANDARD",
             user.Username,
             user.FullName,
             user.Role,

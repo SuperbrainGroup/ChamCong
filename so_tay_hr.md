@@ -47,9 +47,9 @@ Sau khi đăng nhập với tài khoản HR (`hr`), bạn sẽ thấy Bảng đi
 ### Điểm cải tiến quan trọng giúp HR không bị ngợp việc:
 - **Lượt quẹt HỢP LỆ (Đúng máy, đúng Wifi, đúng vị trí)**: Hệ thống **tự động xác nhận** và ghi nhận vào bảng tính công. HR không phải bấm nút duyệt từng lượt một cách thủ công như trước. Danh sách "Lượt cần xác nhận" sẽ luôn sạch sẽ và chỉ hiển thị khi có vấn đề.
 - **Lượt quẹt KHÔNG HỢP LỆ (Bất thường)**: Sẽ xuất hiện cờ cảnh báo màu vàng hoặc đỏ kèm lý do cụ thể:
-  + `Lỗi MAC`: Nhân viên chấm công từ một máy tính lạ chưa được đăng ký.
-  + `Lỗi Wifi`: Nhân viên dùng mạng Wifi lạ hoặc 4G để chấm công điện thoại.
-  + `Lỗi Ngoài vùng`: Vị trí GPS của nhân viên cách cơ sở quá xa bán kính cho phép.
+  + `Máy tính lạ`: Nhân viên chấm công từ một máy tính lạ chưa được đăng ký.
+  + `Sai mạng Wifi`: Nhân viên dùng mạng Wifi lạ hoặc 4G để chấm công điện thoại.
+  + `Ngoài khuôn viên`: Vị trí điện thoại của nhân viên cách cơ sở quá xa khoảng cách cho phép.
 
 ### Cách xử lý:
 1. Nhấp vào lượt bị cảnh báo để xem chi tiết giờ quẹt và nguyên nhân.

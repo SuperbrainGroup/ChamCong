@@ -62,7 +62,7 @@ export const Step4ExportClose: React.FC<Step4ExportCloseProps> = ({ period, onPe
   const handleClosePeriod = async () => {
     const confirmed = await toast.confirm({
       title: 'Xác nhận chốt kỳ công',
-      message: 'Bạn có chắc chắn muốn chốt kỳ công này không? Sau khi chốt, dữ liệu sẽ được khóa an toàn và các kết quả, sổ cái phép không thể thay đổi.',
+      message: 'Bạn có chắc chắn muốn chốt kỳ công này không? Sau khi chốt, dữ liệu sẽ được khóa an toàn và hệ thống sẽ tự động tính lại & cộng +1 ngày phép năm cho tất cả nhân viên làm đủ từ 14 ngày công.',
       confirmText: 'Chốt kỳ công',
       type: 'danger'
     });
@@ -72,7 +72,7 @@ export const Step4ExportClose: React.FC<Step4ExportCloseProps> = ({ period, onPe
     setError(null);
     try {
       await api.post(`/periods/${period.id}/close`);
-      toast.success('Đã chốt kỳ công thành công!');
+      toast.success('Đã chốt kỳ công thành công! Đã tính lại và cộng +1 ngày phép năm cho nhân viên đủ điều kiện.');
       onPeriodUpdated();
     } catch (err: any) {
       const errMsg = err.response?.data?.message || 'Không thể chốt kỳ công.';
@@ -108,7 +108,7 @@ export const Step4ExportClose: React.FC<Step4ExportCloseProps> = ({ period, onPe
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '800px', margin: '0 auto' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
       {/* Export Card */}
       <div className="card">
         <div className="card-header">
@@ -123,7 +123,7 @@ export const Step4ExportClose: React.FC<Step4ExportCloseProps> = ({ period, onPe
 
         <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
           <p style={{ fontSize: '14px', color: 'var(--neutral-600)', lineHeight: 1.6 }}>
-            File Excel xuất ra gồm <strong>2 sheet riêng biệt</strong> (Sheet 1: <strong>Chấm công</strong>; Sheet 2: <strong>Đi trễ về sớm</strong>), đầy đủ <strong>công thức Excel tự động</strong>, font chữ <strong>Times New Roman</strong> và định dạng chuẩn hóa.
+            File Excel xuất ra gồm (Sheet 1: <strong>Chấm công</strong>; Sheet 2: <strong>Đi trễ về sớm</strong>; Sheet 3: <strong>Phép năm</strong>).
           </p>
 
           <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
@@ -225,6 +225,9 @@ export const Step4ExportClose: React.FC<Step4ExportCloseProps> = ({ period, onPe
                   <li>Không còn ngày mang mã nghi vấn thiếu quẹt <code>?</code> hoặc vắng <code>V</code> chưa giải trình.</li>
                   <li>Tất cả mã máy chấm công trong file đã được ghép với nhân viên trong danh mục.</li>
                   <li>Đã chạy tính công ít nhất một lần.</li>
+                  <li style={{ color: '#16a34a', fontWeight: 600 }}>
+                    ⭐ <strong>Tự động cộng phép năm:</strong> Hệ thống tự động tính lại và cộng <strong>+1 ngày phép năm</strong> cho tất cả nhân viên có làm việc từ đủ <strong>14 ngày công</strong> trong kỳ.
+                  </li>
                 </ul>
               </div>
 

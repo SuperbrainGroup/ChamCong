@@ -39,6 +39,7 @@ public class EmployeesController : ControllerBase
         DateTime StartDate,
         DateTime? EndDate,
         bool ExemptPunch,
+        string EmployeeType,
         string? DefaultNote,
         int SortOrder,
         DateTime CreatedAt,
@@ -54,6 +55,7 @@ public class EmployeesController : ControllerBase
         public DateTime StartDate { get; set; }
         public DateTime? EndDate { get; set; }
         public bool ExemptPunch { get; set; }
+        public string EmployeeType { get; set; } = "STANDARD"; // STANDARD | REMOTE | PARTTIME
         public string? DefaultNote { get; set; }
         public int SortOrder { get; set; }
         public bool CreateUserAccount { get; set; } = true;
@@ -103,6 +105,7 @@ public class EmployeesController : ControllerBase
             e.StartDate,
             e.EndDate,
             e.ExemptPunch,
+            e.EmployeeType ?? "STANDARD",
             e.DefaultNote,
             e.SortOrder,
             e.CreatedAt,
@@ -130,7 +133,9 @@ public class EmployeesController : ControllerBase
             e.Id, e.CompanyId, e.EmployeeCode, e.FullName,
             e.DepartmentId, e.DepartmentId.HasValue && depts.TryGetValue(e.DepartmentId.Value, out var dn) ? dn : null,
             e.GroupId, grps.TryGetValue(e.GroupId, out var gn) ? gn : "",
-            e.StartDate, e.EndDate, e.ExemptPunch, e.DefaultNote, e.SortOrder, e.CreatedAt,
+            e.StartDate, e.EndDate, e.ExemptPunch,
+            e.EmployeeType ?? "STANDARD",
+            e.DefaultNote, e.SortOrder, e.CreatedAt,
             u != null,
             u?.Username
         ));
@@ -159,6 +164,7 @@ public class EmployeesController : ControllerBase
             StartDate = dto.StartDate,
             EndDate = dto.EndDate,
             ExemptPunch = dto.ExemptPunch,
+            EmployeeType = string.IsNullOrWhiteSpace(dto.EmployeeType) ? "STANDARD" : dto.EmployeeType.Trim().ToUpperInvariant(),
             DefaultNote = Text.Clean(dto.DefaultNote, 500),
             SortOrder = dto.SortOrder,
             AttendanceSource = "APP",
@@ -176,7 +182,7 @@ public class EmployeesController : ControllerBase
             {
                 EmployeeId = emp.Id,
                 Year = currentYear,
-                AnnualOpening = 12,
+                AnnualOpening = 0, // Phép năm khởi tạo 0 ngày, tích lũy +1 ngày khi đủ >= 14 ngày công mỗi kỳ
                 CarryOpening = 0,
                 CompOpening = 0
             });
@@ -333,10 +339,11 @@ public class EmployeesController : ControllerBase
         emp.StartDate = dto.StartDate;
         emp.EndDate = dto.EndDate;
         emp.ExemptPunch = dto.ExemptPunch;
+        if (!string.IsNullOrWhiteSpace(dto.EmployeeType)) emp.EmployeeType = dto.EmployeeType.Trim().ToUpperInvariant();
         emp.DefaultNote = Text.Clean(dto.DefaultNote, 500);
         emp.SortOrder = dto.SortOrder;
 
-        _audit.Log("Employee", emp.Id, "Update", new { code, name }, companyId: companyId);
+        _audit.Log("Employee", emp.Id, "Update", new { code, name, emp.EmployeeType }, companyId: companyId);
         await _db.SaveChangesAsync(ct);
 
         return Ok(new { message = "Cập nhật nhân viên thành công." });
@@ -350,10 +357,19 @@ public class EmployeesController : ControllerBase
         var emp = await _db.Employees.FirstOrDefaultAsync(e => e.Id == id && e.CompanyId == companyId, ct);
         if (emp == null) return NotFound();
 
-        // Ràng buộc: Nhân viên đã có dữ liệu trong kỳ công thì không được xóa, chỉ đánh dấu ngày nghỉ việc
-        if (await _db.DayResults.AnyAsync(r => r.EmployeeId == id, ct) || await _db.RawPunches.AnyAsync(p => p.EmployeeId == id, ct))
+        // Ràng buộc: Nhân viên đã có dữ liệu trong kỳ công thì không được xóa thường
+        var hasAttendanceData = await _db.DayResults.AnyAsync(r => r.EmployeeId == id, ct)
+            || await _db.RawPunches.AnyAsync(p => p.EmployeeId == id, ct)
+            || await _db.WebAttendanceLogs.AnyAsync(w => w.EmployeeCode == emp.EmployeeCode, ct)
+            || await _db.DailyPunchSummaries.AnyAsync(d => d.EmployeeCode == emp.EmployeeCode, ct);
+
+        if (hasAttendanceData)
         {
-            return BadRequest(new { message = "Nhân viên đã có dữ liệu chấm công trong các kỳ, không được xóa khỏi hệ thống. Vui lòng thiết lập 'Ngày nghỉ việc' để kết thúc làm việc." });
+            return BadRequest(new
+            {
+                hasAttendanceData = true,
+                message = "Nhân viên đã có dữ liệu chấm công trong hệ thống. Bạn chỉ có thể thiết lập 'Ngày nghỉ việc' hoặc Quản trị viên (Admin) có thể thực hiện xóa vĩnh viễn (xóa toàn bộ dữ liệu chấm công)."
+            });
         }
 
         var funds = await _db.LeaveFunds.Where(f => f.EmployeeId == id).ToListAsync(ct);
@@ -367,6 +383,19 @@ public class EmployeesController : ControllerBase
 
         var notes = await _db.PeriodNotes.Where(n => n.EmployeeId == id).ToListAsync(ct);
         if (notes.Count > 0) _db.PeriodNotes.RemoveRange(notes);
+
+        var backups = await _db.DayResultManualBackups.Where(b => b.EmployeeId == id).ToListAsync(ct);
+        if (backups.Count > 0) _db.DayResultManualBackups.RemoveRange(backups);
+
+        // Xóa trước các dữ liệu con để không bị xung đột khóa ngoại FK_LeaveFunds_Employees
+        await _db.SaveChangesAsync(ct);
+
+        // Gỡ liên kết tài khoản user nếu có
+        var linkedUsers = await _db.Users.Where(u => u.EmployeeCode == emp.EmployeeCode).ToListAsync(ct);
+        foreach (var u in linkedUsers)
+        {
+            u.EmployeeCode = null;
+        }
 
         _db.Employees.Remove(emp);
         _audit.Log("Employee", emp.Id, "Delete", $"Xóa nhân viên {emp.EmployeeCode} - {emp.FullName}", companyId: companyId);
@@ -402,7 +431,7 @@ public class EmployeesController : ControllerBase
         var emp = await _db.Employees.FirstOrDefaultAsync(e => e.Id == id && e.CompanyId == companyId, ct);
         if (emp == null) return NotFound();
 
-        // Xóa toàn bộ dữ liệu chấm công liên quan
+        // 1. Dữ liệu liên quan theo EmployeeId:
         var dayResults = await _db.DayResults.Where(r => r.EmployeeId == id).ToListAsync(ct);
         if (dayResults.Count > 0) _db.DayResults.RemoveRange(dayResults);
 
@@ -424,13 +453,68 @@ public class EmployeesController : ControllerBase
         var backups = await _db.DayResultManualBackups.Where(b => b.EmployeeId == id).ToListAsync(ct);
         if (backups.Count > 0) _db.DayResultManualBackups.RemoveRange(backups);
 
+        // 2. Dữ liệu liên quan theo EmployeeCode & Thiết bị (EmployeeDevices):
+        var devices = await _db.EmployeeDevices.Where(d => d.EmployeeCode == emp.EmployeeCode).ToListAsync(ct);
+        var deviceBindingIntIds = devices.Select(d => d.DeviceBindingId).ToList();
+        var deviceBindingIds = devices.Select(d => (int?)d.DeviceBindingId).ToList();
+
+        var webLogs = await _db.WebAttendanceLogs
+            .Where(w => w.EmployeeCode == emp.EmployeeCode || (deviceBindingIntIds.Count > 0 && deviceBindingIntIds.Contains(w.DeviceBindingId)))
+            .ToListAsync(ct);
+        if (webLogs.Count > 0) _db.WebAttendanceLogs.RemoveRange(webLogs);
+
+        var punchSummaries = await _db.DailyPunchSummaries.Where(d => d.EmployeeCode == emp.EmployeeCode).ToListAsync(ct);
+        if (punchSummaries.Count > 0) _db.DailyPunchSummaries.RemoveRange(punchSummaries);
+
+        var adjustments = await _db.TimeAdjustments.Where(a => a.EmployeeCode == emp.EmployeeCode).ToListAsync(ct);
+        if (adjustments.Count > 0) _db.TimeAdjustments.RemoveRange(adjustments);
+
+        var publishedLines = await _db.TimesheetPublishedLines.Where(l => l.EmployeeCode == emp.EmployeeCode).ToListAsync(ct);
+        if (publishedLines.Count > 0) _db.TimesheetPublishedLines.RemoveRange(publishedLines);
+
+        var disputes = await _db.TimesheetDisputes.Where(d => d.EmployeeCode == emp.EmployeeCode).ToListAsync(ct);
+        if (disputes.Count > 0) _db.TimesheetDisputes.RemoveRange(disputes);
+
+        var branchAssignments = await _db.EmployeeBranchAssignments.Where(b => b.EmployeeCode == emp.EmployeeCode).ToListAsync(ct);
+        if (branchAssignments.Count > 0) _db.EmployeeBranchAssignments.RemoveRange(branchAssignments);
+
+        // Đơn từ giải trình & đính kèm
+        var empRequests = await _db.EmployeeRequests.Include(r => r.Attachments).Where(r => r.EmployeeCode == emp.EmployeeCode).ToListAsync(ct);
+        if (empRequests.Count > 0)
+        {
+            foreach (var req in empRequests)
+            {
+                if (req.Attachments != null && req.Attachments.Count > 0)
+                    _db.RequestAttachments.RemoveRange(req.Attachments);
+            }
+            _db.EmployeeRequests.RemoveRange(empRequests);
+        }
+
+        // Thiết bị di động / máy tính & refresh token của thiết bị
+        if (devices.Count > 0)
+        {
+            var devTokens = await _db.RefreshTokens.Where(rt => deviceBindingIds.Contains(rt.DeviceBindingId)).ToListAsync(ct);
+            if (devTokens.Count > 0) _db.RefreshTokens.RemoveRange(devTokens);
+            _db.EmployeeDevices.RemoveRange(devices);
+        }
+
+        // Gỡ EmployeeCode trên các tài khoản User liên kết
+        var linkedUsers = await _db.Users.Where(u => u.EmployeeCode == emp.EmployeeCode).ToListAsync(ct);
+        foreach (var u in linkedUsers)
+        {
+            u.EmployeeCode = null;
+        }
+
+        // Xóa trước toàn bộ các bảng con để thỏa mãn mọi ràng buộc khóa ngoại FK trên SQL Server
+        await _db.SaveChangesAsync(ct);
+
         _db.Employees.Remove(emp);
         _audit.Log("Employee", emp.Id, "ForceDelete",
-            $"Xóa cưỡng bức nhân viên {emp.EmployeeCode} - {emp.FullName} ({dayResults.Count} ngày công, {rawPunches.Count} raw punches)",
+            $"Xóa cưỡng bức nhân viên {emp.EmployeeCode} - {emp.FullName} ({dayResults.Count} ngày công, {rawPunches.Count} raw punches, {webLogs.Count} web logs)",
             companyId: companyId);
         await _db.SaveChangesAsync(ct);
 
-        return Ok(new { message = $"Đã xóa hoàn toàn nhân viên {emp.FullName} cùng {dayResults.Count} bản ghi chấm công." });
+        return Ok(new { message = $"Đã xóa hoàn toàn nhân viên '{emp.FullName}' ({emp.EmployeeCode}) và toàn bộ dữ liệu chấm công liên quan." });
     }
 
     [HttpGet("template-excel")]
@@ -569,15 +653,24 @@ public class EmployeesController : ControllerBase
                 }
             }
 
-            // Xử lý ngày vào làm
+            // Xử lý ngày vào làm (hỗ trợ định dạng Excel dd/MM/yyyy, d/M/yyyy, yyyy-MM-dd)
             DateTime startDate = DateTime.Now.Date;
             if (dateVal.IsDateTime)
             {
                 startDate = dateVal.GetDateTime().Date;
             }
-            else if (DateTime.TryParse(ws.Cell(r, 5).GetString().Trim(), out var parsedDate))
+            else
             {
-                startDate = parsedDate.Date;
+                var dateStr = ws.Cell(r, 5).GetString().Trim();
+                var formats = new[] { "dd/MM/yyyy", "d/M/yyyy", "dd-MM-yyyy", "yyyy-MM-dd", "d/M/yy", "dd/MM/yy" };
+                if (DateTime.TryParseExact(dateStr, formats, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var exactDate))
+                {
+                    startDate = exactDate.Date;
+                }
+                else if (DateTime.TryParse(dateStr, new System.Globalization.CultureInfo("vi-VN"), System.Globalization.DateTimeStyles.None, out var parsedDate))
+                {
+                    startDate = parsedDate.Date;
+                }
             }
 
             // Miễn quẹt thẻ BoD

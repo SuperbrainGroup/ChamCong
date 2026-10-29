@@ -5,11 +5,14 @@ import type {
   UserRequestItem,
   LeaveBalanceSummary,
   PublishedTimesheetData,
+  TimesheetDayItem,
+  TimesheetPeriodItem,
   BranchLocationItem,
   BranchNetworkItem,
   HrDashboardSummary,
   AppNotification,
-  EmployeeDevice
+  EmployeeDevice,
+  WorkSchedule
 } from '../types';
 
 const envApiUrl = (import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '');
@@ -229,7 +232,7 @@ export const devicesApi = {
     return res.data;
   },
 
-  getMyDevices: async (): Promise<{ mobile: EmployeeDevice | null; pc: EmployeeDevice | null }> => {
+  getMyDevices: async (): Promise<{ mobile: EmployeeDevice | null; pc: EmployeeDevice | null; mobileDevices?: EmployeeDevice[] }> => {
     const res = await api.get('/v1/devices/mine');
     return res.data;
   },
@@ -258,6 +261,16 @@ export const devicesApi = {
   updateDeviceMac: async (id: number, macAddress: string) => {
     const res = await api.put(`/v1/hr/devices/${id}/mac`, { macAddress });
     return res.data;
+  },
+
+  deleteDeviceMac: async (id: number) => {
+    const res = await api.delete(`/v1/hr/devices/${id}/mac`);
+    return res.data;
+  },
+
+  deleteDevice: async (id: number) => {
+    const res = await api.delete(`/v1/hr/devices/${id}`);
+    return res.data;
   }
 };
 
@@ -283,9 +296,19 @@ export const requestsApi = {
     return res.data;
   },
 
+  update: async (id: number, formData: FormData) => {
+    const res = await api.put(`/v1/requests/${id}`, formData);
+    return res.data;
+  },
+
+  deleteAttachment: async (id: number) => {
+    const res = await api.delete(`/v1/attachments/${id}`);
+    return res.data;
+  },
+
   // Dành cho HCNS
-  getHrRequests: async (status?: string, branch?: string): Promise<UserRequestItem[]> => {
-    const res = await api.get('/v1/hr/requests', { params: { status, branch } });
+  getHrRequests: async (status?: string, branch?: string, type?: string): Promise<UserRequestItem[]> => {
+    const res = await api.get('/v1/hr/requests', { params: { status, branch, type } });
     return res.data;
   },
 
@@ -294,7 +317,29 @@ export const requestsApi = {
     return res.data;
   },
 
-  getAttachmentUrl: (id: number) => `${API_BASE}/v1/attachments/${id}`
+  batchDecideRequests: async (requestIds: number[], action: 'APPROVE' | 'REJECT', note?: string) => {
+    const res = await api.post('/v1/hr/requests/batch-decision', { requestIds, action, note });
+    return res.data;
+  },
+
+  deleteHrRequest: async (id: number) => {
+    const res = await api.delete(`/v1/hr/requests/${id}`);
+    return res.data;
+  },
+
+  batchDeleteHrRequests: async (requestIds: number[]) => {
+    const res = await api.post('/v1/hr/requests/batch-delete', { requestIds });
+    return res.data;
+  },
+
+  getAttachmentUrl: (id: number, download = false) => {
+    const token = localStorage.getItem('token') || '';
+    const params = new URLSearchParams();
+    if (token) params.set('token', token);
+    if (download) params.set('download', 'true');
+    const qs = params.toString();
+    return `${API_BASE}/v1/attachments/${id}${qs ? `?${qs}` : ''}`;
+  }
 };
 
 // --- 4. HỒ SƠ & QUỸ PHÉP (PROFILE API) ---
@@ -312,8 +357,13 @@ export const profileApi = {
 
 // --- 5. BẢNG CÔNG & KHIẾU NẠI (TIMESHEET API) ---
 export const timesheetApi = {
-  getMyTimesheet: async (periodId: number): Promise<PublishedTimesheetData> => {
+  getMyTimesheet: async (periodId: number = 0): Promise<PublishedTimesheetData> => {
     const res = await api.get('/v1/timesheet/mine', { params: { periodId } });
+    return res.data;
+  },
+
+  getMyPeriods: async (): Promise<TimesheetPeriodItem[]> => {
+    const res = await api.get('/v1/timesheet/periods');
     return res.data;
   },
 
@@ -340,6 +390,11 @@ export const timesheetApi = {
 
   resolveDispute: async (id: number, action: 'ACCEPT' | 'REJECT', response: string) => {
     const res = await api.post(`/v1/hr/timesheet/disputes/${id}/resolve`, { action, response });
+    return res.data;
+  },
+
+  getEmployeeTimesheet: async (params?: { employeeId?: number; employeeCode?: string; periodId?: number; companyId?: number }): Promise<PublishedTimesheetData> => {
+    const res = await api.get('/v1/hr/timesheet/employee', { params });
     return res.data;
   }
 };
@@ -402,8 +457,8 @@ export const hrDashboardApi = {
 
 // --- 8. THÔNG BÁO (NOTIFICATIONS API) ---
 export const notificationsApi = {
-  getMyNotifications: async (): Promise<{ unreadCount: number; notifications: AppNotification[] }> => {
-    const res = await api.get('/v1/notifications');
+  getMyNotifications: async (companyId?: number): Promise<{ unreadCount: number; notifications: AppNotification[] }> => {
+    const res = await api.get('/v1/notifications', { params: companyId ? { companyId } : undefined });
     return res.data;
   },
 
@@ -464,6 +519,8 @@ export interface ShiftHoursData {
   checkoutStartTime: string;
   standardHoursRange: string;
   companyName: string;
+  gracePeriodMinutes: number;
+  graceMaxTimesMonth: number;
 }
 
 export const shiftHoursApi = {
@@ -477,8 +534,56 @@ export const shiftHoursApi = {
     lunchStart?: string;
     lunchMinutes?: number;
     checkoutPrepareMinutes?: number;
+    gracePeriodMinutes?: number;
+    graceMaxTimesMonth?: number;
   }): Promise<{ message: string }> => {
     const res = await api.post(`/companies/${companyId}/shift-hours`, data);
     return res.data;
   }
 };
+
+// --- 11. ĐĂNG KÝ LỊCH LÀM VIỆC (WORK SCHEDULES API) ---
+export const schedulesApi = {
+  getMySchedules: async (from?: string, to?: string) => {
+    const params = new URLSearchParams();
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+    const res = await api.get<{
+      employee: any;
+      schedules: WorkSchedule[];
+      companyCalendar?: {
+        id: number;
+        date: string;
+        dayType: number;
+        halfSession?: string;
+        companyOffCode?: string;
+        note?: string;
+      }[];
+    }>(`/schedules/my?${params}`);
+    return res.data;
+  },
+  register: async (datesOrPayload: string[] | { dates: string[]; shiftCode?: string; note?: string }, shiftCode = 'FULL', note?: string) => {
+    const payload = Array.isArray(datesOrPayload)
+      ? { dates: datesOrPayload, shiftCode, note }
+      : { dates: datesOrPayload.dates, shiftCode: datesOrPayload.shiftCode || 'FULL', note: datesOrPayload.note };
+    const res = await api.post<{ message: string }>('/schedules/register', payload);
+    return res.data;
+  },
+  cancel: async (id: number) => {
+    const res = await api.delete<{ message: string }>(`/schedules/${id}`);
+    return res.data;
+  },
+  getCompanySchedules: async (companyId: number, from?: string, to?: string, employeeCode?: string) => {
+    const params = new URLSearchParams();
+    if (from) params.set('from', from);
+    if (to) params.set('to', to);
+    if (employeeCode) params.set('employeeCode', employeeCode);
+    const res = await api.get<WorkSchedule[]>(`/schedules/company/${companyId}?${params}`);
+    return res.data;
+  },
+  hrBatchRegister: async (companyId: number, employeeCode: string, dates: string[], shiftCode = 'FULL', note?: string) => {
+    const res = await api.post<{ message: string }>(`/schedules/company/${companyId}/batch`, { employeeCode, dates, shiftCode, note });
+    return res.data;
+  }
+};
+

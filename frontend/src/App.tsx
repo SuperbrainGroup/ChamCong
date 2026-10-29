@@ -18,6 +18,8 @@ const CalendarManager = lazy(() => import('./views/admin/CalendarManager').then(
 const LeaveManager = lazy(() => import('./views/admin/LeaveManager').then(m => ({ default: m.LeaveManager })));
 const AuditLogsViewer = lazy(() => import('./views/admin/AuditLogsViewer').then(m => ({ default: m.AuditLogsViewer })));
 const HrAttendanceView = lazy(() => import('./views/admin/HrAttendanceView').then(m => ({ default: m.HrAttendanceView })));
+const HrEmployeeTimesheetView = lazy(() => import('./views/admin/HrEmployeeTimesheetView').then(m => ({ default: m.HrEmployeeTimesheetView })));
+const HrRegularizationView = lazy(() => import('./views/admin/HrRegularizationView').then(m => ({ default: m.HrRegularizationView })));
 const PlatformSettingsManager = lazy(() => import('./views/admin/PlatformSettingsManager').then(m => ({ default: m.PlatformSettingsManager })));
 const EmployeePortalView = lazy(() => import('./views/ess/EmployeePortalView').then(m => ({ default: m.EmployeePortalView })));
 const PcCheckinView = lazy(() => import('./views/ess/PcCheckinView').then(m => ({ default: m.PcCheckinView })));
@@ -47,7 +49,9 @@ const ViewLoadingFallback: React.FC = () => (
 const allowedHrViews = [
   'admin-dashboard',
   'operator',
+  'admin-employee-timesheet',
   'admin-hr-attendance',
+  'admin-regularization',
   'admin-users',
   'admin-employees',
   'admin-calendar',
@@ -55,6 +59,7 @@ const allowedHrViews = [
   'admin-codes',
   'admin-parameters',
   'ess-portal',
+  'ess-schedules',
   'ess-history',
   'ess-requests',
   'ess-devices'
@@ -62,6 +67,7 @@ const allowedHrViews = [
 
 const allowedEmployeeViews = [
   'ess-portal',
+  'ess-schedules',
   'ess-history',
   'ess-requests',
   'ess-devices'
@@ -200,8 +206,9 @@ const MainLayout: React.FC = () => {
     // Xử lý các màn hình tự chấm công của nhân viên (hoặc xem thử)
     if (currentView.startsWith('ess-') || user.role === 'Employee') {
       if (!isMobileMode) {
-        const tabMap: Record<string, 'checkin' | 'history' | 'requests' | 'device'> = {
+        const tabMap: Record<string, 'checkin' | 'schedule' | 'history' | 'requests' | 'device'> = {
           'ess-portal': 'checkin',
+          'ess-schedules': 'schedule',
           'ess-history': 'history',
           'ess-requests': 'requests',
           'ess-devices': 'device'
@@ -217,7 +224,14 @@ const MainLayout: React.FC = () => {
           />
         );
       }
-      return <EmployeePortalView />;
+      return (
+        <EmployeePortalView
+          onNavigate={(v) => {
+            navigateToView(v);
+            setForceMobileView(false);
+          }}
+        />
+      );
     }
 
     if (user.role === 'HR' && !allowedHrViews.includes(currentView)) {
@@ -229,8 +243,12 @@ const MainLayout: React.FC = () => {
         return <OperatorWorkflowView />;
       case 'admin-dashboard':
         return <AdminDashboard onNavigate={(v) => navigateToView(v)} />;
+      case 'admin-employee-timesheet':
+        return <HrEmployeeTimesheetView onBack={handleBack} />;
       case 'admin-hr-attendance':
         return <HrAttendanceView />;
+      case 'admin-regularization':
+        return <HrRegularizationView />;
       case 'admin-companies':
         return <CompaniesManager onBack={handleBack} />;
       case 'admin-users':
